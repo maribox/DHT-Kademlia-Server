@@ -1,0 +1,3 @@
+[submodule "voidphone_pytest"]
+	path = voidphone_pytest
+	url = https://gitlab.lrz.de/netintum/teaching/voidphone_pytest
