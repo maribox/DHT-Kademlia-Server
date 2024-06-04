@@ -1,6 +1,2 @@
-build
-.vscode
-main
-
-# ignore all files in any directory named build
 build/
+.vscode
