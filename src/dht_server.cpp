@@ -73,8 +73,7 @@ std::map<keyType, valueType> local_storage = {};
 std::mutex storage_lock;
 
 // Returns optional value, either the correctly looked up value, or no value.
-std::optional<valueType> get_from_storage(keyType key)
-{
+std::optional<valueType> get_from_storage(keyType key) {
     // shouldn't be needed. Safety mesaure for now, based on python impl.
     std::lock_guard<std::mutex> lock(storage_lock);
     try
