@@ -27,7 +27,7 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
 find_package(Boost REQUIRED COMPONENTS program_options)
 
 add_executable(die_hashies_DHT ${SOURCE_DIR}/dht_server.cpp)
-add_executable(tests ${TEST_DIR}/storage_unit.cpp ${SOURCE_DIR}/dht_server.cpp)
+add_executable(tests ${TEST_DIR}/storage_unit.cpp )
 
 target_include_directories(die_hashies_DHT PRIVATE ${Boost_INCLUDE_DIRS})
 

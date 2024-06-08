@@ -45,11 +45,28 @@ class Bitset{
     bool operator[](int i) const{
        return this->bits[i];
     }
-    
+
+    template<class... Types>
+    std::basic_string<Types...> tostring(Types... args) const {
+      return bits.to_string(std::forward<Types>(args)...);
+    }
+
+    std::string to_string() const {
+      return bits.to_string();
+    }
+
     //TODO: Set function ovverrides all
     template<class ... Types>
     void set(Types... args){
         bits.set(std::forward<Types>(args)...);
+    }
+
+    bool operator==(const Bitset<T> rhs) const {
+      return this->bits == rhs.bits;
+    }
+
+    bool operator!=(const Bitset<T> rhs) const {
+      return this->bits != rhs.bits;
     }
 };
 
@@ -69,7 +86,7 @@ u_short DHT_GET = 651;
 u_short DHT_SUCCESS = 652;
 u_short DHT_FAILURE = 653;
 
-std::map<keyType, valueType> local_storage = {};
+std::map<keyType, valueType> local_storage {};
 std::mutex storage_lock;
 
 // Returns optional value, either the correctly looked up value, or no value.
@@ -85,6 +102,7 @@ std::optional<valueType> get_from_storage(keyType key) {
     catch (std::out_of_range e)
     {
         // Log lookup-miss.
+        std::println(std::cout, "TEST {}", e.what());
         return {};
     }
 }
@@ -92,8 +110,18 @@ std::optional<valueType> get_from_storage(keyType key) {
 void save_to_storage(keyType key, valueType val)
 {
     std::lock_guard<std::mutex> lock(storage_lock);
+    std::cout << "map: " << local_storage.size() << std::endl;
+
     auto fresh_insert = local_storage.insert_or_assign(key, val);
-    // Log fresh_insert. True equiv. to "New value created". False equiv. to "Overwritten, assignment"
+    // std::println(std::cout, "fresh insert: {}", fresh_insert);
+    std::cout << "fresh insert: " << fresh_insert.second << std::endl;
+    std::cout << "map: " << local_storage.size() << std::endl;
+    for (const auto &elem : local_storage) {
+      std::cout <<  elem.first.to_string() << " " << elem.second << std::endl;
+    }
+
+    // Log fresh_insert. True equiv. to "New value created". False equiv. to
+    // "Overwritten, assignment"
 }
 
 bool send_dht_success(); // TODO
@@ -131,6 +159,8 @@ void setupTCP(boost::asio::io_context &in_ctx, char rec_buf[256+64]){
         ); //non-blocking
     ctx.run(); //blocking, could also be called from different thread. Maybe use producer consumer fashion: Producer(receiver) thread: thread-safe enqueue --> Consumer (handler) thread: thread-safe dequeue.
 }
+
+#ifndef TESTING
 
 int main(int argc, char const *argv[])
 {
@@ -189,3 +219,5 @@ int main(int argc, char const *argv[])
 
     return 0;
 }
+
+#endif

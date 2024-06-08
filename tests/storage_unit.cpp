@@ -1,7 +1,13 @@
 #define CATCH_CONFIG_MAIN
+
+#ifndef TESTING
+#define TESTING
+#endif
+
 #include <catch2/catch_test_macros.hpp>
-#include "../src/dht_server.hpp"
 #include <random>
+
+#include "../src/dht_server.cpp"
 
 TEST_CASE("save_to_storage inserts and get_from_storage extracts correct value", "[dht_server]") {
   keyType key;
@@ -39,16 +45,3 @@ TEST_CASE(
   REQUIRE(!get_from_storage(key).has_value());
 }
 
-// Command-Line Argument Tests
-TEST_CASE("does not crash when running without arguments", "[dht_server]") {
-  const char* argv[] = {"dht_app"};
-  int argc = 1;
-  REQUIRE_NOTHROW(main(argc, argv));
-}
-
-TEST_CASE("does not crash when running with correct arguments",
-          "[dht_server]") {
-  const char* argv[] = {"dht_app", "--address", "127.0.0.1", "--port", "1234"};
-  int argc = 5;
-  REQUIRE_NOTHROW(main(argc, argv));
-}
