@@ -7,10 +7,12 @@
 
 #include <bitset>
 #include <mutex>
+#include <array>
 #include <map>
 #include <optional>
 #include <string>
 #include <stdexcept>
+#include <string_view>
 
 /*
 Important Remark: Maybe use a logger for keeping track of operations during runtime.
@@ -19,6 +21,7 @@ https://www.boost.org/doc/libs/1_82_0/libs/log/doc/html/index.html
 */
 namespace progOpt = boost::program_options;
 namespace asIp = boost::asio::ip;
+using boost::asio::ip::tcp;
 
 /*
 Here, the int( former 256 bit bitset) represents a SHA256 digest.
@@ -28,17 +31,27 @@ maybe use std::vectors or something...
 //TODO: Performance critical, comparison
 template <int T>
 class Bitset{
+    public:
     std::bitset<T> bits;
-    bool operator<(const Bitset<T> b){
+    bool operator<(const Bitset<T> rhs) const{
         for(int i = 0; i < T; i++){
-            if(b[i] < bits[i]){
+            if(rhs[i] < bits[i]){
                 return false;
             }
-            return true;
         }
+        return true;
+    }
+
+    bool operator[](int i) const{
+       return this->bits[i];
+    }
+    
+    //TODO: Set function ovverrides all
+    template<class ... Types>
+    void set(Types... args){
+        bits.set(std::forward<Types>(args)...);
     }
 };
-
 
 
 using keyType = Bitset<256>;
@@ -47,6 +60,9 @@ using keyType = Bitset<256>;
 using valueType = int;
 
 asIp::address DHT_ADDR{asIp::make_address("127.0.0.1")}; // This ip is solely mock, use own ip, best make it commandline argument (loopback or local ip)
+tcp::endpoint SERVER_ENDPOINT{DHT_ADDR , 7401}; //fixed, set by python client
+tcp::endpoint CLIENT_ENDPOINT{DHT_ADDR , 7401};  //may vary?
+
 u_short DHT_PORT = 7401;
 u_short DHT_PUT = 650;
 u_short DHT_GET = 651;
@@ -85,17 +101,36 @@ bool send_dht_success(); // TODO
 
 bool send_dht_failure(); // TODO
 
-// Custom validate function for boost::asio::ip::address
-void validate(boost::any &v, const std::vector<std::string> &values, asIp::address *, int)
-{
-    // Make sure no previous assignment to 'v' was made
-    boost::program_options::validators::check_first_occurrence(v);
 
-    // Extract the string from 'values'
-    const std::string &s = boost::program_options::validators::get_single_string(values);
+//TODO: Implement method parameter usage
+ //max header + key size, used for DHT_PUT
 
-    // Create the address from the string
-    v = boost::any(asIp::make_address(s));
+/**
+ * @brief setup initial tcp connection
+ * 
+ * @param rec_buf buffer for receiving incoming DHT_requests. Size of 64+256 provides at least enough bytes
+ * for all DHT_queries without their possible value (just metadata). 
+ * @param in_ctx io_context of the serverSocket, used for dispatching asynchronus IO with handlers.
+ */
+void setupTCP(boost::asio::io_context &in_ctx, char rec_buf[256+64]){
+    boost::asio::io_context ctx;
+    tcp::socket serverSocket(ctx, SERVER_ENDPOINT);
+    //this connects to the port and establishes this programm instance as "port-user 7401"
+    //std::array<char, 256+32> buf; //min header + key size, used for DHT_GET, _SUCCESS, _FAILURE
+
+    serverSocket.async_receive(
+        boost::asio::buffer(rec_buf,256+64),
+        [&](std::error_code ec, size_t bytesReceived){
+            if(!ec && bytesReceived > 0){
+                std::cout << "Received: " << std::string_view(rec_buf,bytesReceived) << std::endl;
+            }
+            else{
+                //TODO: Problem, Transport endpoint is not connected. (ec hit)
+                std::cout << "Error! No bytes received! " << ec.message() << std::endl;
+            }
+        }
+        ); //non-blocking
+    ctx.run(); //blocking, could also be called from different thread. Maybe use producer consumer fashion: Producer(receiver) thread: thread-safe enqueue --> Consumer (handler) thread: thread-safe dequeue.
 }
 
 int main(int argc, char const *argv[])
@@ -146,6 +181,12 @@ int main(int argc, char const *argv[])
 
     std::cout << "Host: " << host << "\n"
               << "Port: " << port << "\n";
-    
+
+    boost::asio::io_context ctx;
+    char rec_buf[256+64];
+
+    setupTCP(ctx,rec_buf);
+
+
     return 0;
 }
