@@ -6,7 +6,6 @@
 #include <boost/multiprecision/cpp_int.hpp>
 #include <boost/program_options.hpp>
 
-
 #include <mutex>
 #include <array>
 #include <map>
@@ -24,25 +23,23 @@ namespace progOpt = boost::program_options;
 namespace asIp = boost::asio::ip;
 using boost::asio::ip::tcp;
 
-DHTServerConfig::DHTServerConfig() 
-    : dht_addr(boost::asio::ip::make_address("127.0.0.1"))
-{}
+const boost::asio::ip::address DHTServerConfig::DEFAULT_DHT_ADDR = boost::asio::ip::make_address("127.0.0.1");
 
-asIp::address DHT_ADDR{asIp::make_address("127.0.0.1")}; // This ip is solely mock, use own ip, best make it commandline argument (loopback or local ip)
-tcp::endpoint SERVER_ENDPOINT{DHT_ADDR , 7401}; //fixed, set by python client
-tcp::endpoint CLIENT_ENDPOINT{DHT_ADDR , 7401};  //may vary?
+DHTServerConfig config;
 
-u_short DHT_PORT = 7401;
-u_short DHT_PUT = 650;
-u_short DHT_GET = 651;
-u_short DHT_SUCCESS = 652;
-u_short DHT_FAILURE = 653;
+DHTServerConfig::DHTServerConfig()
+    : dht_addr(DEFAULT_DHT_ADDR),
+      server_endpoint(dht_addr, dht_port),
+      client_endpoint(dht_addr, dht_port + 1)
+{
+}
 
-std::map<keyType, valueType,BitsetComparator<KEYSIZE>> local_storage {};
+std::map<keyType, valueType, BitsetComparator<KEYSIZE>> local_storage{};
 std::mutex storage_lock;
 
 // Returns optional value, either the correctly looked up value, or no value.
-std::optional<valueType> get_from_storage(const keyType& key) {
+std::optional<valueType> get_from_storage(const keyType &key)
+{
     // shouldn't be needed. Safety mesaure for now, based on python impl.
     std::lock_guard<std::mutex> lock(storage_lock);
     try
@@ -54,12 +51,11 @@ std::optional<valueType> get_from_storage(const keyType& key) {
     catch (std::out_of_range e)
     {
         // Log lookup-miss.
-        std::cout << "TEST {}" << e.what() << "\n";
         return {};
     }
 }
 
-void save_to_storage(const keyType& key, valueType val)
+void save_to_storage(const keyType &key, valueType val)
 {
     std::lock_guard<std::mutex> lock(storage_lock);
 
@@ -72,43 +68,68 @@ bool send_dht_success(); // TODO
 
 bool send_dht_failure(); // TODO
 
-
-//TODO: Implement method parameter usage
- //max header + key size, used for DHT_PUT
-
-/**
- * @brief setup initial tcp connection
- * 
- * @param rec_buf buffer for receiving incoming DHT_requests. Size of 64+256 provides at least enough bytes
- * for all DHT_queries without their possible value (just metadata). 
- * @param in_ctx io_context of the serverSocket, used for dispatching asynchronus IO with handlers.
- */
-void setupTCP(boost::asio::io_context &in_ctx, char rec_buf[256+64]){
-    tcp::socket serverSocket(in_ctx, SERVER_ENDPOINT);
-    //this connects to the port and establishes this programm instance as "port-user 7401"
-    //std::array<char, 256+32> buf; //min header + key size, used for DHT_GET, _SUCCESS, _FAILURE
-
-    serverSocket.async_receive(
-        boost::asio::buffer(rec_buf,256+64),
-        [&](std::error_code ec, size_t bytesReceived){
+void handle_connection(tcp::socket&& socket) {
+    // Buffer for receiving incoming DHT_requests
+    char rec_buf[256 + 64];
+    socket.async_receive(
+        boost::asio::buffer(rec_buf, 256 + 64),
+        [rec_buf, socket = std::move(socket)](std::error_code ec, size_t bytesReceived) mutable{
+            //Good, vital connection:
             if(!ec && bytesReceived > 0){
+                //Here, add parsing for Kademliad DHT logic
                 std::cout << "Received: " << std::string_view(rec_buf,bytesReceived) << std::endl;
-            }
+                handle_connection(std::move(socket));
+            }   
             else{
-                //TODO: Problem, Transport endpoint is not connected. (ec hit)
-                std::cout << "Error! No bytes received! " << ec.message() << std::endl;
+                //Somewhat wrong connection. Determine flaw:
+                if(ec){
+                    std::cout << "Handle_Connection Error: " << ec.message() << std::endl;
+                }
+                else if (bytesReceived == 0){
+                    std::cout << "Connection closed by remote." << std::endl;
+                }
             }
         }
-        ); //non-blocking
-    in_ctx.run(); //blocking, could also be called from different thread. Maybe use producer consumer fashion: Producer(receiver) thread: thread-safe enqueue --> Consumer (handler) thread: thread-safe dequeue.
+    );
 }
+
+void start_accepting(tcp::acceptor& acceptor) {
+    acceptor.async_accept(
+        [&acceptor](std::error_code ec, tcp::socket socket){
+            if (!ec) {
+                std::cout << "Accepted new connection from " << socket.remote_endpoint() << std::endl;
+                handle_connection(std::move(socket));
+            }else{
+                std::cout << "Accept Error: " << ec.message() << std::endl;
+            }
+            //Accept new conncetion. This seems like recursion, but is more like tail recursion.
+            start_accepting(acceptor);
+        }
+    );
+}
+
+/**
+ * @brief setup initial tcp connections
+ * @param in_ctx io_context of the serverSocket, used for dispatching asynchronus IO with handlers.
+ */
+
+void setupTCPs(boost::asio::io_context &ctx) {
+    tcp::acceptor acceptor(ctx, tcp::endpoint(tcp::v4(), config.dht_port));
+
+    start_accepting(acceptor);
+
+    ctx.run(); // TODO: Blocking call to run the I/O context. Do this in another thread.
+}
+
+
+
 
 #ifndef TESTING
 
 int main(int argc, char const *argv[])
 {
-    asIp::address host = DHT_ADDR;
-    u_short port = DHT_PORT;
+    asIp::address host = config.dht_addr;
+    u_short port = config.dht_port;
     std::string host_string = {};
 
     try
@@ -155,10 +176,8 @@ int main(int argc, char const *argv[])
               << "Port: " << port << "\n";
 
     boost::asio::io_context ctx;
-    char rec_buf[256+64];
 
-    setupTCP(ctx,rec_buf);
-
+    setupTCPs(ctx);
 
     return 0;
 }

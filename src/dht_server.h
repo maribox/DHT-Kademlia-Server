@@ -20,6 +20,8 @@ public:
     static constexpr u_short DEFAULT_DHT_SUCCESS = 652;
     static constexpr u_short DEFAULT_DHT_FAILURE = 653;
 
+    static const boost::asio::ip::address DEFAULT_DHT_ADDR;
+
     DHTServerConfig();
 
     const boost::asio::ip::address dht_addr;
@@ -28,6 +30,10 @@ public:
     u_short dht_get = DEFAULT_DHT_GET;
     u_short dht_success = DEFAULT_DHT_SUCCESS;
     u_short dht_failure = DEFAULT_DHT_FAILURE;
+
+    // Declare endpoints
+    boost::asio::ip::tcp::endpoint server_endpoint;
+    boost::asio::ip::tcp::endpoint client_endpoint;
 };
 
 extern DHTServerConfig config;
