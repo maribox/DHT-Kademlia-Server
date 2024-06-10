@@ -1,11 +1,12 @@
+#include "dht_server.h"
 #include <iostream>
-#include <boost/stacktrace.hpp>
 
+#include <boost/stacktrace.hpp>
 #include <boost/asio.hpp>
 #include <boost/multiprecision/cpp_int.hpp>
 #include <boost/program_options.hpp>
 
-#include <bitset>
+
 #include <mutex>
 #include <array>
 #include <map>
@@ -23,58 +24,9 @@ namespace progOpt = boost::program_options;
 namespace asIp = boost::asio::ip;
 using boost::asio::ip::tcp;
 
-/*
-Here, the int( former 256 bit bitset) represents a SHA256 digest.
-The int however is not fixed, it should store arbitrary values...
-maybe use std::vectors or something...
-*/
-//TODO: Performance critical, comparison
-template <int T>
-class Bitset{
-    public:
-    std::bitset<T> bits;
-    bool operator<(const Bitset<T> rhs) const{
-        for(int i = 0; i < T; i++){
-            if(rhs[i] < bits[i]){
-                return false;
-            }
-        }
-        return true;
-    }
-
-    bool operator[](int i) const{
-       return this->bits[i];
-    }
-
-    template<class... Types>
-    std::basic_string<Types...> tostring(Types... args) const {
-      return bits.to_string(std::forward<Types>(args)...);
-    }
-
-    std::string to_string() const {
-      return bits.to_string();
-    }
-
-    //TODO: Set function ovverrides all
-    template<class ... Types>
-    void set(Types... args){
-        bits.set(std::forward<Types>(args)...);
-    }
-
-    bool operator==(const Bitset<T> rhs) const {
-      return this->bits == rhs.bits;
-    }
-
-    bool operator!=(const Bitset<T> rhs) const {
-      return this->bits != rhs.bits;
-    }
-};
-
-
-using keyType = Bitset<256>;
-
-/*defaults valueType to int*/
-using valueType = int;
+DHTServerConfig::DHTServerConfig() 
+    : dht_addr(boost::asio::ip::make_address("127.0.0.1"))
+{}
 
 asIp::address DHT_ADDR{asIp::make_address("127.0.0.1")}; // This ip is solely mock, use own ip, best make it commandline argument (loopback or local ip)
 tcp::endpoint SERVER_ENDPOINT{DHT_ADDR , 7401}; //fixed, set by python client
@@ -86,11 +38,11 @@ u_short DHT_GET = 651;
 u_short DHT_SUCCESS = 652;
 u_short DHT_FAILURE = 653;
 
-std::map<keyType, valueType> local_storage {};
+std::map<keyType, valueType,BitsetComparator<KEYSIZE>> local_storage {};
 std::mutex storage_lock;
 
 // Returns optional value, either the correctly looked up value, or no value.
-std::optional<valueType> get_from_storage(keyType key) {
+std::optional<valueType> get_from_storage(const keyType& key) {
     // shouldn't be needed. Safety mesaure for now, based on python impl.
     std::lock_guard<std::mutex> lock(storage_lock);
     try
@@ -102,24 +54,16 @@ std::optional<valueType> get_from_storage(keyType key) {
     catch (std::out_of_range e)
     {
         // Log lookup-miss.
-        std::println(std::cout, "TEST {}", e.what());
+        std::cout << "TEST {}" << e.what() << "\n";
         return {};
     }
 }
 
-void save_to_storage(keyType key, valueType val)
+void save_to_storage(const keyType& key, valueType val)
 {
     std::lock_guard<std::mutex> lock(storage_lock);
-    std::cout << "map: " << local_storage.size() << std::endl;
 
     auto fresh_insert = local_storage.insert_or_assign(key, val);
-    // std::println(std::cout, "fresh insert: {}", fresh_insert);
-    std::cout << "fresh insert: " << fresh_insert.second << std::endl;
-    std::cout << "map: " << local_storage.size() << std::endl;
-    for (const auto &elem : local_storage) {
-      std::cout <<  elem.first.to_string() << " " << elem.second << std::endl;
-    }
-
     // Log fresh_insert. True equiv. to "New value created". False equiv. to
     // "Overwritten, assignment"
 }
@@ -140,8 +84,7 @@ bool send_dht_failure(); // TODO
  * @param in_ctx io_context of the serverSocket, used for dispatching asynchronus IO with handlers.
  */
 void setupTCP(boost::asio::io_context &in_ctx, char rec_buf[256+64]){
-    boost::asio::io_context ctx;
-    tcp::socket serverSocket(ctx, SERVER_ENDPOINT);
+    tcp::socket serverSocket(in_ctx, SERVER_ENDPOINT);
     //this connects to the port and establishes this programm instance as "port-user 7401"
     //std::array<char, 256+32> buf; //min header + key size, used for DHT_GET, _SUCCESS, _FAILURE
 
@@ -157,7 +100,7 @@ void setupTCP(boost::asio::io_context &in_ctx, char rec_buf[256+64]){
             }
         }
         ); //non-blocking
-    ctx.run(); //blocking, could also be called from different thread. Maybe use producer consumer fashion: Producer(receiver) thread: thread-safe enqueue --> Consumer (handler) thread: thread-safe dequeue.
+    in_ctx.run(); //blocking, could also be called from different thread. Maybe use producer consumer fashion: Producer(receiver) thread: thread-safe enqueue --> Consumer (handler) thread: thread-safe dequeue.
 }
 
 #ifndef TESTING
