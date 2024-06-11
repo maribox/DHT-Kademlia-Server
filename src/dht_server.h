@@ -44,7 +44,29 @@ extern std::mutex storage_lock;
 std::optional<valueType> get_from_storage(const keyType& key);
 void save_to_storage(const keyType& key, valueType val);
 
-bool send_dht_success(); // TODO
-bool send_dht_failure(); // TODO
+bool send_dht_success(const boost::asio::ip::address, u_short, keyType, valueType); // TODO
+bool send_dht_failure(const boost::asio::ip::address, u_short, keyType); // TODO
+ // TODO
 
 void setupTCP(boost::asio::io_context &in_ctx, char rec_buf[256+64]);
+
+class ReceiveFrame
+{
+    u_short size;
+    u_short dht_type;
+    u_short time_to_live;
+    char replication;
+    char reserved;
+    std::bitset<KEYSIZE> key;
+    std::vector<char> data;
+
+    //Intentionally listed constructors, for others reading this code :)
+    ReceiveFrame() = default;
+
+    ReceiveFrame(const ReceiveFrame& other) = default;
+
+    ReceiveFrame& operator=(const ReceiveFrame& other) = default;
+
+    ~ReceiveFrame() = default;
+
+};

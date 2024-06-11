@@ -64,22 +64,69 @@ void save_to_storage(const keyType &key, valueType val)
     // "Overwritten, assignment"
 }
 
-bool send_dht_success(); // TODO
+void parseRequest(std::shared_ptr<std::array<char, 320UL>> rec_buf,size_t bytesReceived) {
+    //GIGANTIC SWITCH CASE, HANDLE LOGIC OF REQUESTS.
+    //if (bytesReceived < 32) --> Critical, message header torn apart
+    u_short *short_rec_buf = (u_short *) rec_buf->data();
+    u_short size = short_rec_buf[0];
+    u_short dht_type = short_rec_buf[1];
+    u_short time_to_live = short_rec_buf[2];
+    char replication = rec_buf->at(6);
+    char reserved = rec_buf->at(7);
 
-bool send_dht_failure(); // TODO
+    switch (dht_type)
+    {
+    case DHTServerConfig::DEFAULT_DHT_GET:
+        //1. kademlia logic, ID in my range?
+        //2. Yes? --> Retreive value from local storage
+        //   No?  --> Forward request with k-bucket table
+        //3. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
+        break;
+    case DHTServerConfig::DEFAULT_DHT_PUT:
+        //1. kademlia logic, ID in my range?
+        //2. Yes? --> Save to value local storage
+        //3. No? Consider Replication field:
+        //                                  --> With replication factor in range?
+        //                                  --> Yes? --> Save to value local storage
+        //4. No --> Forward put_request with k-bucket table and await answer
+        //5. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
+        break;
+    case DHTServerConfig::DEFAULT_DHT_SUCCESS:
+        // Was the value intended for me?
+        // Yes? --> Forward to my client.
+        // No? --> Forward answer to original peer
+        break;
+    case DHTServerConfig::DEFAULT_DHT_FAILURE:
+        // Was the value intended for me?
+        // Yes? --> Forward to my client.
+        // No? --> Forward answer to original peer
+        break;
+    
+    default:
+        break;
+    }
 
-void handle_connection(tcp::socket&& socket) {
+}
+
+bool send_dht_success(const boost::asio::ip::address address, u_short port,
+                       keyType key, valueType value); // TODO
+
+bool send_dht_failure(const boost::asio::ip::address address, u_short port, keyType key); // TODO
+
+void handle_connection(std::shared_ptr<tcp::socket> socket) {
     // Buffer for receiving incoming DHT_requests
-    char rec_buf[256 + 64];
-    socket.async_receive(
-        boost::asio::buffer(rec_buf, 256 + 64),
-        [rec_buf, socket = std::move(socket)](std::error_code ec, size_t bytesReceived) mutable{
+    auto rec_buf = std::make_shared<std::array<char, 256 + 64>>();
+    socket->async_receive(
+        boost::asio::buffer(*rec_buf, 256 + 64),
+        [rec_buf, socket](std::error_code ec, size_t bytesReceived) mutable {
             //Good, vital connection:
             if(!ec && bytesReceived > 0){
                 //Here, add parsing for Kademliad DHT logic
-                std::cout << "Received: " << std::string_view(rec_buf,bytesReceived) << std::endl;
-                handle_connection(std::move(socket));
-            }   
+                std::cout << "Received: " << bytesReceived << " Bytes: " << std::string_view(rec_buf->data(),bytesReceived) << std::endl;
+                //parseRequest
+                parseRequest(rec_buf,bytesReceived);
+                handle_connection(socket);
+            }
             else{
                 //Somewhat wrong connection. Determine flaw:
                 if(ec){
@@ -94,11 +141,12 @@ void handle_connection(tcp::socket&& socket) {
 }
 
 void start_accepting(tcp::acceptor& acceptor) {
-    acceptor.async_accept(
-        [&acceptor](std::error_code ec, tcp::socket socket){
+    auto socket = std::make_shared<tcp::socket>(acceptor.get_executor());
+    acceptor.async_accept(*socket,
+        [&acceptor,socket](std::error_code ec){
             if (!ec) {
-                std::cout << "Accepted new connection from " << socket.remote_endpoint() << std::endl;
-                handle_connection(std::move(socket));
+                std::cout << "Accepted new connection from " << socket->remote_endpoint() << std::endl;
+                handle_connection(socket);
             }else{
                 std::cout << "Accept Error: " << ec.message() << std::endl;
             }
