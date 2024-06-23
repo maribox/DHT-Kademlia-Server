@@ -34,7 +34,7 @@ DHTServerConfig::DHTServerConfig()
 {
 }
 
-std::map<keyType, valueType, BitsetComparator<KEYSIZE>> local_storage{};
+std::map<keyType, valueType> local_storage{};
 std::mutex storage_lock;
 
 // Returns optional value, either the correctly looked up value, or no value.
@@ -65,24 +65,34 @@ void save_to_storage(const keyType &key, valueType val)
 }
 
 void parseRequest(std::shared_ptr<std::array<char, 320UL>> rec_buf,size_t bytesReceived) {
-    //GIGANTIC SWITCH CASE, HANDLE LOGIC OF REQUESTS.
     //if (bytesReceived < 32) --> Critical, message header torn apart
+    //See specification for all bit-fields, their size and interpretation.
     u_short *short_rec_buf = (u_short *) rec_buf->data();
+
+    //Size and dht_tye are at invariant positions.
     u_short size = short_rec_buf[0];
     u_short dht_type = short_rec_buf[1];
-    u_short time_to_live = short_rec_buf[2];
-    char replication = rec_buf->at(6);
-    char reserved = rec_buf->at(7);
+    //key is always transmitted, at different positions.
+    std::vector<char> data;
 
+    ReceiveFrame rf{short_rec_buf[0],short_rec_buf[1]};
+
+
+    //GIGANTIC SWITCH CASE, HANDLE LOGIC OF REQUESTS.
     switch (dht_type)
     {
-    case DHTServerConfig::DEFAULT_DHT_GET:
-        //1. kademlia logic, ID in my range?
-        //2. Yes? --> Retreive value from local storage
-        //   No?  --> Forward request with k-bucket table
-        //3. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
-        break;
     case DHTServerConfig::DEFAULT_DHT_PUT:
+        {
+        rf.time_to_live  = short_rec_buf[2];
+        rf.replication = rec_buf->at(6);
+        rf.reserved = rec_buf->at(7);
+        //copy key into dataframe
+        std::copy_n(rec_buf->begin() + 8, KEYSIZE, std::begin(rf.key));
+
+        //copy value into dataframe
+        size_t data_size = rec_buf->end() - (rec_buf->begin() + (8+KEYSIZE)) ;
+        rf.value.reserve(data_size);
+        std::copy_n(rec_buf->begin() + 8 + KEYSIZE, data_size, std::back_inserter(rf.value));
         //1. kademlia logic, ID in my range?
         //2. Yes? --> Save to value local storage
         //3. No? Consider Replication field:
@@ -91,21 +101,47 @@ void parseRequest(std::shared_ptr<std::array<char, 320UL>> rec_buf,size_t bytesR
         //4. No --> Forward put_request with k-bucket table and await answer
         //5. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
         break;
+        }
+    case DHTServerConfig::DEFAULT_DHT_GET:
+        {
+        //copy key into dataframe
+        std::copy_n(rec_buf->begin() + 4, KEYSIZE, std::begin(rf.key));
+        //1. kademlia logic, ID in my range?
+        //2. Yes? --> Retreive value from local storage
+        //   No?  --> Forward request with k-bucket table
+        //3. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
+            //3. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
+        break;}
+    
     case DHTServerConfig::DEFAULT_DHT_SUCCESS:
+        {
+        //copy key into dataframe
+        std::copy_n(rec_buf->begin() + 4, KEYSIZE, std::begin(rf.key));
+
+        //copy value into dataframe
+        size_t data_size = rec_buf->end() - (rec_buf->begin() + (4+KEYSIZE));
+        rf.value.reserve(data_size);
+        std::copy_n(rec_buf->begin() + 4 + KEYSIZE, data_size, std::back_inserter(rf.value));
+        
         // Was the value intended for me?
         // Yes? --> Forward to my client.
         // No? --> Forward answer to original peer
-        break;
+        break;}
     case DHTServerConfig::DEFAULT_DHT_FAILURE:
+        {
+        //copy key into dataframe
+        std::copy_n(rec_buf->begin() + 4, KEYSIZE, std::begin(rf.key));
+
         // Was the value intended for me?
         // Yes? --> Forward to my client.
         // No? --> Forward answer to original peer
-        break;
+        break;}
     
     default:
         break;
     }
 
+    
 }
 
 bool send_dht_success(const boost::asio::ip::address address, u_short port,

@@ -5,10 +5,10 @@
 #include <map>
 #include <mutex>
 #include <string>
-#include <bitset>
+#include <array>
 #include "util.h"
 
-using keyType = std::bitset<KEYSIZE>;
+using keyType = std::array<char,KEYSIZE>;
 using valueType = int;
 
 
@@ -38,7 +38,7 @@ public:
 
 extern DHTServerConfig config;
 
-extern std::map<keyType, valueType, BitsetComparator<KEYSIZE>> local_storage;
+extern std::map<keyType, valueType> local_storage;
 extern std::mutex storage_lock;
 
 std::optional<valueType> get_from_storage(const keyType& key);
@@ -52,13 +52,19 @@ void setupTCP(boost::asio::io_context &in_ctx, char rec_buf[256+64]);
 
 class ReceiveFrame
 {
+public:
     u_short size;
     u_short dht_type;
     u_short time_to_live;
     char replication;
     char reserved;
-    std::bitset<KEYSIZE> key;
-    std::vector<char> data;
+    std::array<char,KEYSIZE> key;
+    std::vector<char> value;
+
+    ReceiveFrame(u_short size, u_short dht_type, u_short time_to_live = 0, char replication = 0,char reserved = 0, std::array<char,KEYSIZE>  key = {}, std::vector<char> value = {}): 
+    size(size), dht_type(dht_type), time_to_live(time_to_live), replication(replication), reserved(reserved)
+    {}
+
 
     //Intentionally listed constructors, for others reading this code :)
     ReceiveFrame() = default;

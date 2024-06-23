@@ -10,14 +10,7 @@
 #include "../src/dht_server.cpp"
 
 TEST_CASE("save_to_storage inserts and get_from_storage extracts correct value", "[dht_server]") {
-  keyType key;
-  key.set(0);
-  key.set(3);
-  key.set(4);
-  key.set(5);
-  key.set(8);
-  key.set(10);
-
+  keyType key{1,2,3,4,5};
   valueType value = 98419561;
   save_to_storage(key, value);
   std::optional<valueType> returned_value = get_from_storage(key);
@@ -41,7 +34,7 @@ TEST_CASE(
     "available",
     "[dht_server]") {
   keyType key;
-  REQUIRE_NOTHROW(key.set(255));
+  REQUIRE_NOTHROW(key.at(32) = 0x80);
   REQUIRE(!get_from_storage(key).has_value());
 }
 
