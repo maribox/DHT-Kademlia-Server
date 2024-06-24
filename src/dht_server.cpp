@@ -13,6 +13,7 @@
 #include <string>
 #include <stdexcept>
 #include <string_view>
+#include <chrono>
 
 /*
 Important Remark: Maybe use a logger for keeping track of operations during runtime.
@@ -26,7 +27,6 @@ using boost::asio::ip::tcp;
 const boost::asio::ip::address DHTServerConfig::DEFAULT_DHT_ADDR = boost::asio::ip::make_address("127.0.0.1");
 
 DHTServerConfig config;
-
 DHTServerConfig::DHTServerConfig()
     : dht_addr(DEFAULT_DHT_ADDR),
       server_endpoint(dht_addr, dht_port),
@@ -34,8 +34,25 @@ DHTServerConfig::DHTServerConfig()
 {
 }
 
-std::map<keyType, valueType> local_storage{};
+std::map<keyType,std::pair<std::chrono::time_point<std::chrono::system_clock>, valueType>> local_storage{};
 std::mutex storage_lock;
+
+
+bool isInMyRange(keyType key){
+    return true;
+}
+
+
+std::string key_to_string(const keyType &key) {
+    std::string str{};
+        
+    for (auto it = key.cbegin() ; it < key.end(); it++) {
+        str += *it;
+    }
+    return str;
+}
+
+
 
 // Returns optional value, either the correctly looked up value, or no value.
 std::optional<valueType> get_from_storage(const keyType &key)
@@ -45,8 +62,14 @@ std::optional<valueType> get_from_storage(const keyType &key)
     try
     {
         // We could also perform kademlia tree index checks here.
-        return {local_storage.at(key)};
-        // Log lookup-hit.
+        if(local_storage.contains(key)){ //Log look-up hit, but maybe outdated.
+            auto [ttl,value] = local_storage.at(key);
+            if (ttl >= std::chrono::system_clock::now())
+                return {value}; // Log lookup-hit.
+            else
+                return {}; // Log lookup-miss.
+        }
+        
     }
     catch (std::out_of_range e)
     {
@@ -55,14 +78,15 @@ std::optional<valueType> get_from_storage(const keyType &key)
     }
 }
 
-void save_to_storage(const keyType &key, valueType val)
+void save_to_storage(const keyType &key, std::chrono::seconds ttl, valueType val)
 {
     std::lock_guard<std::mutex> lock(storage_lock);
 
-    auto fresh_insert = local_storage.insert_or_assign(key, val);
+    auto fresh_insert = local_storage.insert_or_assign(key, std::pair{std::chrono::system_clock::now() + ttl,val});
     // Log fresh_insert. True equiv. to "New value created". False equiv. to
     // "Overwritten, assignment"
 }
+
 
 void parseRequest(std::shared_ptr<std::array<char, 320UL>> rec_buf,size_t bytesReceived) {
     //if (bytesReceived < 32) --> Critical, message header torn apart
@@ -93,6 +117,9 @@ void parseRequest(std::shared_ptr<std::array<char, 320UL>> rec_buf,size_t bytesR
         size_t data_size = rec_buf->end() - (rec_buf->begin() + (8+KEYSIZE)) ;
         rf.value.reserve(data_size);
         std::copy_n(rec_buf->begin() + 8 + KEYSIZE, data_size, std::back_inserter(rf.value));
+        if(isInMyRange(rf.key)){
+            //send_dht_success()
+        }
         //1. kademlia logic, ID in my range?
         //2. Yes? --> Save to value local storage
         //3. No? Consider Replication field:
