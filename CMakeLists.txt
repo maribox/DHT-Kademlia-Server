@@ -28,6 +28,7 @@ find_package(Boost REQUIRED COMPONENTS program_options)
 
 add_executable(dht_server ${SOURCE_DIR}/dht_server.cpp)
 add_executable(testing ${TEST_DIR}/storage_unit.cpp )
+add_executable(dht_server_wo_boost ${SOURCE_DIR}/dht_server_wo_boost.cpp)
 
 target_include_directories(dht_server PRIVATE ${Boost_INCLUDE_DIRS})
 
@@ -35,6 +36,7 @@ target_compile_options(dht_server PRIVATE -g -no-pie)
 target_compile_definitions(dht_server PRIVATE BOOST_STACKTRACE_USE_ADDR2LINE)
 
 target_link_libraries(dht_server PRIVATE ${Boost_LIBRARIES})
+target_link_libraries(dht_server_wo_boost PRIVATE ${Boost_LIBRARIES})
 target_link_libraries(testing PRIVATE Catch2::Catch2WithMain ${Boost_LIBRARIES})
 
 target_link_options(dht_server PRIVATE -no-pie)

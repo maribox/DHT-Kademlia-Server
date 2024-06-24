@@ -25,16 +25,6 @@ namespace progOpt = boost::program_options;
 namespace asIp = boost::asio::ip;
 using boost::asio::ip::tcp;
 
-const boost::asio::ip::address DHTServerConfig::DEFAULT_DHT_ADDR = boost::asio::ip::make_address("127.0.0.1");
-
-DHTServerConfig config;
-DHTServerConfig::DHTServerConfig()
-    : dht_addr(DEFAULT_DHT_ADDR),
-      server_endpoint(dht_addr, dht_port),
-      client_endpoint(dht_addr, dht_port + 1)
-{
-}
-
 std::map<keyType,std::pair<std::chrono::time_point<std::chrono::system_clock>, valueType>> local_storage{};
 std::mutex storage_lock;
 
@@ -68,9 +58,12 @@ std::optional<valueType> get_from_storage(const keyType &key)
             if (ttl >= std::chrono::system_clock::now())
                 return {value}; // Log lookup-hit.
             else
+            {
+                local_storage.erase(key);
                 return {}; // Log lookup-miss.
+            }
         }
-        
+        return {};
     }
     catch (std::out_of_range e)
     {
@@ -106,7 +99,7 @@ void parseRequest(std::shared_ptr<std::array<char, 320UL>> rec_buf,size_t bytesR
     //GIGANTIC SWITCH CASE, HANDLE LOGIC OF REQUESTS.
     switch (dht_type)
     {
-    case DHTServerConfig::DEFAULT_DHT_PUT:
+    case DHTServerConfig::DHT_PUT:
         {
         rf.time_to_live  = short_rec_buf[2];
         rf.replication = rec_buf->at(6);
@@ -130,7 +123,7 @@ void parseRequest(std::shared_ptr<std::array<char, 320UL>> rec_buf,size_t bytesR
         //5. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
         break;
         }
-    case DHTServerConfig::DEFAULT_DHT_GET:
+    case DHTServerConfig::DHT_GET:
         {
         //copy key into dataframe
         std::copy_n(rec_buf->begin() + 4, KEYSIZE, std::begin(rf.key));
@@ -141,7 +134,7 @@ void parseRequest(std::shared_ptr<std::array<char, 320UL>> rec_buf,size_t bytesR
             //3. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
         break;}
     
-    case DHTServerConfig::DEFAULT_DHT_SUCCESS:
+    case DHTServerConfig::DHT_SUCCESS:
         {
         //copy key into dataframe
         std::copy_n(rec_buf->begin() + 4, KEYSIZE, std::begin(rf.key));
@@ -155,7 +148,7 @@ void parseRequest(std::shared_ptr<std::array<char, 320UL>> rec_buf,size_t bytesR
         // Yes? --> Forward to my client.
         // No? --> Forward answer to original peer
         break;}
-    case DHTServerConfig::DEFAULT_DHT_FAILURE:
+    case DHTServerConfig::DHT_FAILURE:
         {
         //copy key into dataframe
         std::copy_n(rec_buf->begin() + 4, KEYSIZE, std::begin(rf.key));
@@ -226,30 +219,19 @@ void start_accepting(tcp::acceptor& acceptor) {
  */
 
 void setupTCPs(boost::asio::io_context &ctx) {
-    tcp::acceptor acceptor(ctx, tcp::endpoint(tcp::v4(), config.dht_port));
-
-    start_accepting(acceptor);
+    
+    //start_accepting(acceptor);
 
     ctx.run(); // TODO: Blocking call to run the I/O context. Do this in another thread.
 }
 
-std::string key_to_string(const keyType &key) {
-  std::stringstream ss;
-  ss << std::hex << std::setfill(' ');
-
-  for (unsigned char c : key) {
-    ss << std::setw(2) << static_cast<int>(c);
-  }
-
-  return ss.str();
-}
 
 #ifndef TESTING
 
 int main(int argc, char const *argv[])
 {
-    asIp::address host = config.dht_addr;
-    u_short port = config.dht_port;
+    asIp::address host = DHTServerConfig::DHT_ADDR;
+    u_short port = DHTServerConfig::DHT_PORT;
     std::string host_string = {};
 
     try
@@ -290,6 +272,7 @@ int main(int argc, char const *argv[])
     {
         std::cerr << excep.what() << '\n';
         std::cout << boost::stacktrace::stacktrace();
+        return -1;
     }
 
     // Setting up Routing Table
@@ -299,9 +282,37 @@ int main(int argc, char const *argv[])
               << "Port: " << port << "\n"
               << "NodeID" << key_to_string(routing_table.get_node_id()) << "\n";
 
+
     boost::asio::io_context ctx;
 
-    setupTCPs(ctx);
+    boost::asio::ip::tcp::acceptor acceptor(ctx);
+    boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::tcp::v4(), port);
+    acceptor.open(endpoint.protocol());
+    acceptor.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true));
+    acceptor.bind(endpoint);
+    acceptor.listen();
+    
+    //start_accepting(acceptor);
+    bool serverIsRunning = true;
+    struct ConnectionInfo{};
+    std::vector<boost::asio::ip::tcp::socket> connectionMap;
+
+    while(serverIsRunning){
+        //internal management
+        //clean up local_storage
+        acceptor.async_wait(boost::asio::ip::tcp::acceptor::wait_read,
+            [&](const boost::system::error_code& error) {
+                if(!error){
+                    auto & socket = connectionMap.emplace_back(ctx);
+                    acceptor.accept(socket);
+                    std::printf("Accepted new connection!\n");
+                }
+            });
+
+        ctx.run(); // TODO: Blocking call to run the I/O context. Do this in another thread.
+
+    }   
+
 
     return 0;
 }
