@@ -1,19 +1,20 @@
 #include "dht_server.h"
-#include <iostream>
 
-#include <boost/stacktrace.hpp>
+#include <array>
 #include <boost/asio.hpp>
 #include <boost/multiprecision/cpp_int.hpp>
 #include <boost/program_options.hpp>
-
-#include <mutex>
-#include <array>
+#include <boost/stacktrace.hpp>
+#include <iostream>
 #include <map>
+#include <mutex>
 #include <optional>
-#include <string>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <chrono>
+
+#include "routing.cpp"
 
 /*
 Important Remark: Maybe use a logger for keeping track of operations during runtime.
@@ -232,8 +233,16 @@ void setupTCPs(boost::asio::io_context &ctx) {
     ctx.run(); // TODO: Blocking call to run the I/O context. Do this in another thread.
 }
 
+std::string key_to_string(const keyType &key) {
+  std::stringstream ss;
+  ss << std::hex << std::setfill(' ');
 
+  for (unsigned char c : key) {
+    ss << std::setw(2) << static_cast<int>(c);
+  }
 
+  return ss.str();
+}
 
 #ifndef TESTING
 
@@ -283,8 +292,12 @@ int main(int argc, char const *argv[])
         std::cout << boost::stacktrace::stacktrace();
     }
 
+    // Setting up Routing Table
+    auto routing_table = RoutingTable(generateRandomNodeID(), host, port);
+
     std::cout << "Host: " << host << "\n"
-              << "Port: " << port << "\n";
+              << "Port: " << port << "\n"
+              << "NodeID" << key_to_string(routing_table.get_node_id()) << "\n";
 
     boost::asio::io_context ctx;
 

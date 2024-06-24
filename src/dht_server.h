@@ -11,9 +11,10 @@
 using keyType = std::array<char,KEYSIZE>;
 using valueType = int;
 
+std::string key_to_string(const keyType& key);
 
 class DHTServerConfig {
-public:
+   public:
     static constexpr u_short DEFAULT_DHT_PORT = 7401;
     static constexpr u_short DEFAULT_DHT_PUT = 650;
     static constexpr u_short DEFAULT_DHT_GET = 651;

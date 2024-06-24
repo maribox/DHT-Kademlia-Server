@@ -26,18 +26,18 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
 
 find_package(Boost REQUIRED COMPONENTS program_options)
 
-add_executable(die_hashies_DHT ${SOURCE_DIR}/dht_server.cpp)
+add_executable(dht_server ${SOURCE_DIR}/dht_server.cpp)
 add_executable(testing ${TEST_DIR}/storage_unit.cpp )
 
-target_include_directories(die_hashies_DHT PRIVATE ${Boost_INCLUDE_DIRS})
+target_include_directories(dht_server PRIVATE ${Boost_INCLUDE_DIRS})
 
-target_compile_options(die_hashies_DHT PRIVATE -g -no-pie)
-target_compile_definitions(die_hashies_DHT PRIVATE BOOST_STACKTRACE_USE_ADDR2LINE)
+target_compile_options(dht_server PRIVATE -g -no-pie)
+target_compile_definitions(dht_server PRIVATE BOOST_STACKTRACE_USE_ADDR2LINE)
 
-target_link_libraries(die_hashies_DHT PRIVATE ${Boost_LIBRARIES})
+target_link_libraries(dht_server PRIVATE ${Boost_LIBRARIES})
 target_link_libraries(testing PRIVATE Catch2::Catch2WithMain ${Boost_LIBRARIES})
 
-target_link_options(die_hashies_DHT PRIVATE -no-pie)
+target_link_options(dht_server PRIVATE -no-pie)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
