@@ -12,7 +12,7 @@
 TEST_CASE("save_to_storage inserts and get_from_storage extracts correct value", "[dht_server]") {
   keyType key{1,2,3,4,5};
   valueType value = 98419561;
-  save_to_storage(key, value);
+  save_to_storage(key, std::chrono::seconds{0}, value);
   std::optional<valueType> returned_value = get_from_storage(key);
 
   REQUIRE(returned_value.has_value());
@@ -20,7 +20,7 @@ TEST_CASE("save_to_storage inserts and get_from_storage extracts correct value",
 
   SECTION("save_to_storage overwrites old value") {
     valueType secondValue = 123;
-    save_to_storage(key, secondValue);
+    save_to_storage(key,std::chrono::seconds{0}, secondValue);
     std::optional<valueType> returned_second_value = get_from_storage(key);
     REQUIRE(returned_second_value.has_value());
     REQUIRE(returned_second_value.value() == secondValue);

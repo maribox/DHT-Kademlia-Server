@@ -28,6 +28,15 @@ Boost provides one, seemingly a bit hard to setup, but anyways:
 https://www.boost.org/doc/libs/1_82_0/libs/log/doc/html/index.html
 */
 
+
+
+
+std::unordered_map<int,ConnectionInfo> connectionMap;
+static constexpr size_t MAXLIFETIMESEC = 20*60; // 20 minutes in seconds
+static constexpr size_t MINLIFETIMESEC = 3*60;  //  3 minutes in seconds 
+static constexpr size_t DEFAULTLIFETIMESEC = 5*60; // 5 minutes in seconds
+
+
 std::map<keyType,std::pair<std::chrono::time_point<std::chrono::system_clock>, valueType>> local_storage{};
 std::mutex storage_lock;
 
@@ -71,7 +80,7 @@ std::optional<valueType> get_from_storage(const keyType &key)
     }
 }
 
-void save_to_storage(const keyType &key, std::chrono::seconds ttl, valueType val)
+void save_to_storage(const keyType &key, std::chrono::seconds ttl, valueType &val)
 {
     std::lock_guard<std::mutex> lock(storage_lock);
 
@@ -80,93 +89,203 @@ void save_to_storage(const keyType &key, std::chrono::seconds ttl, valueType val
     // "Overwritten, assignment"
 }
 
-
-void parseRequest(std::shared_ptr<std::array<char, 320UL>> rec_buf,size_t bytesReceived) {
-    //if (bytesReceived < 32) --> Critical, message header torn apart
-    //See specification for all bit-fields, their size and interpretation.
-    u_short *short_rec_buf = (u_short *) rec_buf->data();
-
-    //Size and dht_tye are at invariant positions.
-    u_short size = short_rec_buf[0];
-    u_short dht_type = short_rec_buf[1];
-    //key is always transmitted, at different positions.
-    std::vector<char> data;
-
-    ReceiveFrame rf{short_rec_buf[0],short_rec_buf[1]};
-
-
-    //GIGANTIC SWITCH CASE, HANDLE LOGIC OF REQUESTS.
-    switch (dht_type)
-    {
-    case DHTServerConfig::DHT_PUT:
-        {
-        rf.time_to_live  = short_rec_buf[2];
-        rf.replication = rec_buf->at(6);
-        rf.reserved = rec_buf->at(7);
-        //copy key into dataframe
-        std::copy_n(rec_buf->begin() + 8, KEYSIZE, std::begin(rf.key));
-
-        //copy value into dataframe
-        size_t data_size = rec_buf->end() - (rec_buf->begin() + (8+KEYSIZE)) ;
-        rf.value.reserve(data_size);
-        std::copy_n(rec_buf->begin() + 8 + KEYSIZE, data_size, std::back_inserter(rf.value));
-        if(isInMyRange(rf.key)){
-            //send_dht_success()
-        }
-        //1. kademlia logic, ID in my range?
-        //2. Yes? --> Save to value local storage
-        //3. No? Consider Replication field:
-        //                                  --> With replication factor in range?
-        //                                  --> Yes? --> Save to value local storage
-        //4. No --> Forward put_request with k-bucket table and await answer
-        //5. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
-        break;
-        }
-    case DHTServerConfig::DHT_GET:
-        {
-        //copy key into dataframe
-        std::copy_n(rec_buf->begin() + 4, KEYSIZE, std::begin(rf.key));
-        //1. kademlia logic, ID in my range?
-        //2. Yes? --> Retreive value from local storage
-        //   No?  --> Forward request with k-bucket table
-        //3. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
-            //3. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
-        break;}
-    
-    case DHTServerConfig::DHT_SUCCESS:
-        {
-        //copy key into dataframe
-        std::copy_n(rec_buf->begin() + 4, KEYSIZE, std::begin(rf.key));
-
-        //copy value into dataframe
-        size_t data_size = rec_buf->end() - (rec_buf->begin() + (4+KEYSIZE));
-        rf.value.reserve(data_size);
-        std::copy_n(rec_buf->begin() + 4 + KEYSIZE, data_size, std::back_inserter(rf.value));
-        
-        // Was the value intended for me?
-        // Yes? --> Forward to my client.
-        // No? --> Forward answer to original peer
-        break;}
-    case DHTServerConfig::DHT_FAILURE:
-        {
-        //copy key into dataframe
-        std::copy_n(rec_buf->begin() + 4, KEYSIZE, std::begin(rf.key));
-
-        // Was the value intended for me?
-        // Yes? --> Forward to my client.
-        // No? --> Forward answer to original peer
-        break;}
-    
-    default:
-        break;
-    }
-
-    
-}
-
 bool send_dht_success(socket_t socket, keyType key, valueType value); // TODO
 
 bool send_dht_failure(socket_t socket, keyType key); // TODO
+
+bool forgeDHTSuccess(ConnectionInfo &connectInfo, const valueType &value){
+    //TODO
+    //Save buffer into connectInfo
+    return true;
+};
+
+
+bool parseHeader(ConnectionInfo &connectInfo, u_short &messageSize, u_short &dhtType){
+    std::vector<char> &connectionBuffer = connectInfo.receivedBytes;
+    u_short msg_size = 0;
+    u_short dht_type = 0;
+
+    msg_size += connectionBuffer[0];
+    msg_size <<= 8;
+    msg_size += connectionBuffer[1];
+    /*The message is expected to not even contain a key.
+    All messages that adhere to protocol require a key sent.*/
+    if(msg_size < KEYSIZE){
+        return false;
+    }
+
+    msg_size += connectionBuffer[2];
+    msg_size <<= 8;
+    msg_size += connectionBuffer[3];
+    /*The dht_type that was transmitted is not in the range of expected types*/
+    if(dht_type < DHT_PUT || dht_type > DHT_FAILURE ){
+        return false;
+    }
+    //Both fields contain possible values.
+    messageSize = msg_size;
+    dhtType = dht_type;
+    return true;
+}
+
+bool parseFullRequest(ConnectionInfo &connectInfo, const u_short messageSize, const u_short dhtType){
+    std::vector<char> &connectionBuffer = connectInfo.receivedBytes;
+    switch (dhtType){
+        {
+        case DHT_PUT:
+            {   
+                const size_t ttl_offset = HEADERSIZE;
+                const size_t key_offset = ttl_offset + 4;
+                const size_t value_offset = key_offset + KEYSIZE;
+
+                //copy key into local var
+                std::array<char,KEYSIZE> key;
+                std::copy_n(connectionBuffer.begin() + key_offset, KEYSIZE, std::begin(key));
+                
+                if(not isInMyRange(key)){
+                    //todo: Relay!!
+                    //--> Forward put_request with k-bucket table and await answer
+                    //5. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
+                }
+
+                u_short time_to_live = connectionBuffer[ttl_offset + 1];
+                time_to_live <<= 8;
+                time_to_live += connectionBuffer[ttl_offset];
+                if(time_to_live > MAXLIFETIMESEC || time_to_live < MINLIFETIMESEC){
+                    //default time to live, as value is out of lifetime bounds
+                    time_to_live = DEFAULTLIFETIMESEC;
+                }
+
+                char replication = connectionBuffer[ttl_offset + 2];
+                char reserved = connectionBuffer[ttl_offset + 3];
+
+                //copy value into dataframe
+                size_t value_size = connectionBuffer.size() - value_offset;
+                std::vector<char> value;
+                value.reserve(value_size);
+                std::copy_n(connectionBuffer.begin() + value_offset, value_size, std::begin(value));
+
+                save_to_storage(key,std::chrono::seconds(time_to_live),value);
+
+                break;
+            }
+        case DHT_GET:
+            {
+                const size_t key_offset = HEADERSIZE;
+                
+                //copy key into local var
+                std::array<char,KEYSIZE> key;
+                std::copy_n(connectionBuffer.begin() + key_offset, KEYSIZE, std::begin(key));
+                
+                if(not isInMyRange(key)){
+                    //todo: Relay!!
+                    //--> Forward get_request with k-bucket table and await answer
+                    //5. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
+                }
+
+                auto optVal = get_from_storage(key);
+                if(optVal.has_value()){
+                    //local storage hit, forge answer to requesting party:
+                    forgeDHTSuccess(connectInfo,optVal.value());
+
+                    //TODO: Queue send event in epoll, readied if EPOLLOUT
+                    return true;
+                }
+                break;
+            }
+        
+        case DHT_SUCCESS:
+            {
+
+                const size_t key_offset = HEADERSIZE;
+                const size_t value_offset = key_offset + KEYSIZE;
+                //copy key into local var
+                std::array<char,KEYSIZE> key;
+                std::copy_n(connectionBuffer.begin() + key_offset, KEYSIZE, std::begin(key));
+
+                if(!isInMyRange(key)){
+                    //todo: Relay!!
+                    //--> Forward unmodified dht_success message with k-bucket table and DO NOT await answer.
+                    //We do not expect any confirmation.
+                    //close connection
+                }
+
+                //todo: Answer (basically same as relay)
+                //--> Forward unmodified dht_success message with k-bucket table and DO NOT await answer.
+                //We do not expect any confirmation.
+                //close connection
+                break;
+
+            }
+        case DHT_FAILURE:
+            {
+                //copy key into dataframe
+                const size_t key_offset = HEADERSIZE;
+                //copy key into local var
+                std::array<char,KEYSIZE> key;
+                std::copy_n(connectionBuffer.begin() + key_offset, KEYSIZE, std::begin(key));
+
+
+                if(!isInMyRange(key)){
+                    //todo: Relay!!
+                    //--> Forward unmodified dht_failure message with k-bucket table and DO NOT await answer.
+                    //We do not expect any confirmation.
+                    //close connection
+                }
+
+                //todo: Answer (basically same as relay)
+                //--> Forward unmodified dht_failure message with k-bucket table and DO NOT await answer.
+                //We do not expect any confirmation.
+                //close connection
+                break;
+            }
+        
+        default:
+            break;
+        }
+    }
+    return true;
+}
+
+ProcessingStatus tryProcessing(int curfd){
+    //retreive information for element to process:
+    ConnectionInfo &connectInfo = connectionMap.at(curfd);
+    auto &connectionBuffer = connectInfo.receivedBytes;
+    size_t byteCountToProcess = connectionBuffer.size();
+    if(connectionBuffer.size() == 0){
+        /* i.e.: we got work to process (epoll event happened), the message buffer
+        is empty, but all bytes of the kernel buffer were exhausted (server side).*/
+        return ProcessingStatus::error;
+    }
+    if(connectionBuffer.size() < 4){
+        return ProcessingStatus::waitForCompleteMessageHeader;
+    }
+
+    //Parse header:
+    u_short body_size = -1;
+    u_short dht_type = -1;
+
+    bool headerSuccess = parseHeader(connectInfo, body_size, dht_type);
+    if (not headerSuccess){
+        return ProcessingStatus::error;
+    }
+
+    //Header was successfully parsed. Check if entire message is present:
+    if(byteCountToProcess < HEADERSIZE + body_size){
+        return ProcessingStatus::waitForCompleteMessageBody;
+    }
+    //Header was fully parsed and entire message is present. Do the "heavy lifting", parse received request semantically:
+    
+    
+    /* Probably unsmart decision, therefore commented out. 
+    If relay necessary, modifying original dataframe is unneccessary.
+    //Erase header from received data. Header was already extracted.
+    //connectionBuffer.erase(connectionBuffer.begin(), connectionBuffer.begin() + HEADERSIZE);
+    */
+    bool parseSemanticSuccess = parseFullRequest(connectInfo, body_size, dht_type);
+
+    //TODO: CHECK THIS RETURN!! Maybe false in future
+    return ProcessingStatus::processed;
+}
 
 
 #ifndef TESTING
@@ -212,6 +331,7 @@ int main(int argc, char const *argv[])
     }
     catch (std::exception excep)
     {
+        std::cout << "Is the argument parsing a problem?" << std::endl;
         std::cerr << excep.what() << '\n';
         std::cout << boost::stacktrace::stacktrace();
         return -1;
@@ -227,19 +347,11 @@ int main(int argc, char const *argv[])
     //start_accepting(acceptor);
     bool serverIsRunning = true;
 
-    struct ConnectionInfo{
-        std::vector<char> receivedBytes;
-        std::vector<char> sendBytes; //This is a todo send buffer. See epoll case EPOLLOUT.
-        socket_t relayTo{-1}; //Possibly relay the request to other server that sits closer (XOR) to the requested key.
-    };
-
-
-    std::unordered_map<int,ConnectionInfo> connectionMap;
-    int one = 1;
+    static constexpr int ONE = 1;
     socket_t serversocket = socket(AF_INET6,SOCK_STREAM,0);
     
-    setsockopt(serversocket,SOL_SOCKET,SO_REUSEPORT,&one,sizeof(one));
-    setsockopt(serversocket,SOL_SOCKET,SO_KEEPALIVE,&one,sizeof(one));
+    setsockopt(serversocket,SOL_SOCKET,SO_REUSEPORT,&ONE,sizeof(ONE));
+    setsockopt(serversocket,SOL_SOCKET,SO_KEEPALIVE,&ONE,sizeof(ONE));
 
     sockaddr_in6 sock_addr;
     sock_addr.sin6_family = AF_INET6;
@@ -271,6 +383,7 @@ int main(int argc, char const *argv[])
         for(int i = 0; i < eventCount; ++i){
             auto curEvent = eventsPerLoop[i];
             if(curEvent.data.fd == serversocket){
+                //accept new client connections from serverside
                 socket_t client_socket = accept4(curEvent.data.fd,nullptr,nullptr,SOCK_NONBLOCK);
                 if(!client_socket){
                     //Accept-Error
@@ -281,15 +394,18 @@ int main(int argc, char const *argv[])
                 epollEvent.data.fd = client_socket;
                 epoll_ctl(epollfd,EPOLL_CTL_ADD,client_socket,&epollEvent);
             }else{
-                //client processing
+                //handle client processing of existing seassions
                 if(curEvent.events & EPOLLIN){
                     std::array<char,4096> recv_buf{};
                     auto curfd = curEvent.data.fd;
                     auto &connectionBuffer = connectionMap.at(curfd).receivedBytes;
                     while(true){
+                        //This loop is used in order to pull all bytes that 
+                        //reside already on this machine in the kernel socket buffer.
+                        //once this exausts, we try processing.
                         auto bytesRead = read(curfd,recv_buf.data(),recv_buf.size());
                         if(bytesRead==0){
-                            //Finished reading, try processing. Watch out for maybe incomplete message. TODO.
+                            bool processingStatus = tryProcessing(curfd);
                             break;
                         }
                         else if (bytesRead == -1){
