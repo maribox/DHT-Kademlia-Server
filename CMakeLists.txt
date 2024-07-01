@@ -22,7 +22,7 @@ set(SOURCE_DIR ./src)
 set(TEST_DIR ./tests)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE OFF)
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0") # Add -O0 flag for debug builds
 
 find_package(Boost REQUIRED COMPONENTS program_options)
 

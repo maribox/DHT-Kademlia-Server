@@ -398,6 +398,9 @@ int main(int argc, char const *argv[])
                 if(curEvent.events & EPOLLIN){
                     std::array<char,4096> recv_buf{};
                     auto curfd = curEvent.data.fd;
+                    if(!connectionMap.contains(curfd)){
+                        connectionMap.insert_or_assign(curfd,ConnectionInfo{});
+                    }
                     auto &connectionBuffer = connectionMap.at(curfd).receivedBytes;
                     while(true){
                         //This loop is used in order to pull all bytes that 
@@ -406,6 +409,10 @@ int main(int argc, char const *argv[])
                         auto bytesRead = read(curfd,recv_buf.data(),recv_buf.size());
                         if(bytesRead==0){
                             bool processingStatus = tryProcessing(curfd);
+                            std::cout << "Processing finished: " << processingStatus << std::endl;
+                            if(processingStatus == true){
+                                //epoll_ctl(epollfd,EPOLL_CTL_DEL,curfd,nullptr);
+                            }
                             break;
                         }
                         else if (bytesRead == -1){
