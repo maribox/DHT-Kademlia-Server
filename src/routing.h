@@ -7,7 +7,7 @@
 #include <random>
 #include <vector>
 
-#include "dht_server.h"
+#include "dht_server_wo_boost.h"
 
 extern const size_t K;
 
