@@ -16,33 +16,36 @@ using UDP_Port = uint16_t;
 using NodeID = keyType;
 
 struct Node {
-  NodeID id;
-  boost::asio::ip::address ip;
-  uint16_t port;
+    in6_addr addr;
+    in_port_t port;
+    NodeID id;
 };
 
 class K_Bucket {
- private:
-  std::list<Node> peers;
-  std::list<Node> replacement_cache;
-  NodeID start;
-  NodeID end;
+   private:
+    NodeID start;
+    NodeID end;
+    std::list<Node> peers;
+    std::list<Node> replacement_cache;
 
- public:
-  K_Bucket();
-  void add_peer(const Node& peer);
-  const std::list<Node>& get_peers() const;
-};
-
-class RoutingTable {
- private:
-  std::vector<K_Bucket> bucket_list;
-  Node us;
- public:
-  RoutingTable(const NodeID& id, const boost::asio::ip::address& ip,
-               const uint16_t& port);
-  void split_bucket();
-  const NodeID& get_node_id() const;
+   public:
+    K_Bucket(const NodeID& start, const NodeID& end);
+    void add_peer(const Node& peer);
+    NodeID get_start();
+    NodeID get_end();
+    const std::list<Node>& get_peers() const;
 };
 
 NodeID generateRandomNodeID();
+
+class RoutingTable {
+   private:
+    std::vector<K_Bucket> bucket_list;
+    Node local_node;
+
+   public:
+    void split_bucket();
+    RoutingTable(const in6_addr& ip, const in_port_t& port, const NodeID& id = generateRandomNodeID());
+    const Node& get_local_node() const;
+    const std::vector<K_Bucket>& get_bucket_list() const;
+};

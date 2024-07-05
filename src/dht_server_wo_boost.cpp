@@ -1,4 +1,5 @@
 #include "dht_server_wo_boost.h"
+#include "routing.h"
 
 #include <array>
 #include <sys/socket.h>
@@ -108,7 +109,7 @@ bool forgeDHTFailure(ConnectionInfo &connectInfo, const valueType &value){
 
 
 bool parseHeader(ConnectionInfo &connectInfo, u_short &messageSize, u_short &dhtType){
-    std::vector<char> &connectionBuffer = connectInfo.receivedBytes;
+    std::vector<unsigned char> &connectionBuffer = connectInfo.receivedBytes;
     u_short msg_size = 0;
     u_short dht_type = 0;
 
@@ -145,7 +146,7 @@ bool parseFullRequest(ConnectionInfo &connectInfo, const u_short messageSize, co
                 const size_t value_offset = key_offset + KEYSIZE;
 
                 //copy key into local var
-                std::array<char,KEYSIZE> key;
+                std::array<unsigned char,KEYSIZE> key;
                 std::copy_n(connectionBuffer.cbegin() + key_offset, KEYSIZE, std::begin(key));
                 
                 if(not isInMyRange(key)){
@@ -162,12 +163,12 @@ bool parseFullRequest(ConnectionInfo &connectInfo, const u_short messageSize, co
                     time_to_live = DEFAULTLIFETIMESEC;
                 }
 
-                char replication = connectionBuffer[ttl_offset + 2];
-                char reserved = connectionBuffer[ttl_offset + 3];
+                unsigned char replication = connectionBuffer[ttl_offset + 2];
+                unsigned char reserved = connectionBuffer[ttl_offset + 3];
 
                 //copy value into local var
                 size_t value_size = connectionBuffer.size() - value_offset;
-                std::vector<char> value;
+                std::vector<unsigned char> value;
                 value.reserve(value_size);
                 std::copy_n(connectionBuffer.cbegin() + value_offset, value_size, std::begin(value));
 
@@ -180,7 +181,7 @@ bool parseFullRequest(ConnectionInfo &connectInfo, const u_short messageSize, co
                 const size_t key_offset = HEADERSIZE;
                 
                 //copy key into local var
-                std::array<char,KEYSIZE> key;
+                std::array<unsigned char,KEYSIZE> key;
                 std::copy_n(connectionBuffer.cbegin() + key_offset, KEYSIZE, std::begin(key));
                 
                 if(not isInMyRange(key)){
@@ -211,7 +212,7 @@ bool parseFullRequest(ConnectionInfo &connectInfo, const u_short messageSize, co
                 const size_t key_offset = HEADERSIZE;
                 const size_t value_offset = key_offset + KEYSIZE;
                 //copy key into local var
-                std::array<char,KEYSIZE> key;
+                std::array<unsigned char,KEYSIZE> key;
                 std::copy_n(connectionBuffer.begin() + key_offset, KEYSIZE, std::begin(key));
 
                 if(!isInMyRange(key)){
@@ -235,7 +236,7 @@ bool parseFullRequest(ConnectionInfo &connectInfo, const u_short messageSize, co
                 //copy key into dataframe
                 const size_t key_offset = HEADERSIZE;
                 //copy key into local var
-                std::array<char,KEYSIZE> key;
+                std::array<unsigned char,KEYSIZE> key;
                 std::copy_n(connectionBuffer.begin() + key_offset, KEYSIZE, std::begin(key));
 
                 if(!isInMyRange(key)){
@@ -251,13 +252,109 @@ bool parseFullRequest(ConnectionInfo &connectInfo, const u_short messageSize, co
                 //close connection
                 break;
             }
-        
+        case DHT_RPC_PING:
+            handleDHTRPCPing(connectInfo);
+        break;
+        case DHT_RPC_STORE:
+            handleDHTRPCStore(connectInfo);
+        break;
+        case DHT_RPC_FIND_NODE:
+            handleDHTRPCFindNode(connectInfo);
+        break;
+        case DHT_RPC_FIND_VALUE:
+            handleDHTRPCFindValue(connectInfo);
+        break;
+
+        case DHT_RPC_PING_REPLY:
+            handleDHTRPCPingReply(connectInfo);
+        break;
+        case DHT_RPC_STORE_REPLY:
+            handleDHTRPCStoreReply(connectInfo);
+        break;
+        case DHT_RPC_FIND_NODE_REPLY:
+            handleDHTRPCFindNodeReply(connectInfo);
+        break;
+        case DHT_RPC_FIND_VALUE_REPLY:
+            handleDHTRPCFindValueReply(connectInfo);
+        break;
+        case DHT_ERROR:
+            handleDHTError(connectInfo);
+        break;
         default:
             break;
         }
     }
     return true;
 }
+void handleDHTRPCPing(const ConnectionInfo& connectInfo) {
+    const valueType &connectionBuffer = connectInfo.receivedBytes;
+    const size_t rpc_id_offset = HEADERSIZE;
+        
+    // forgeDHTPingReply(connectInfo, rpc_id);
+}
+
+void handleDHTRPCStore(const ConnectionInfo& connectInfo) {
+    const valueType &connectionBuffer = connectInfo.receivedBytes;
+    const size_t rpc_id_offset = HEADERSIZE;
+    const size_t ttl_offset = rpc_id_offset + 32;
+    const size_t key_offset = ttl_offset + 2;
+    const size_t value_offset = key_offset + KEYSIZE;
+
+    // TODO: look at DHT_STORE, also decide on difference of functionalities
+
+    // forgeDHTStoreReply(connectInfo, rpc_id, key, value);
+}
+
+void handleDHTRPCFindNode(const ConnectionInfo& connectInfo) {
+    const valueType &connectionBuffer = connectInfo.receivedBytes;
+    const size_t rpc_id_offset = HEADERSIZE;
+    const size_t node_id_offset = rpc_id_offset + 32;
+
+    // find closest nodes, then return them:
+
+    // forgeDHTFindNodeReply(connectInfo, rpc_id, closest_nodes);
+}
+
+void handleDHTRPCFindValue(const ConnectionInfo& connectInfo) {
+    const valueType &connectionBuffer = connectInfo.receivedBytes;
+    const size_t rpc_id_offset = HEADERSIZE;
+    const size_t key_offset = rpc_id_offset + 32;
+
+    keyType key;
+    std::copy_n(connectionBuffer.begin() + key_offset, KEYSIZE, std::begin(key));
+
+    // two questions: cbegin or begin here and std::begin correct?
+
+
+    auto optVal = get_from_storage(key);
+    if (optVal.has_value()) {
+        // forgeDHTFindValueReply(connectInfo, rpc_id, key, optVal.value());
+    } else {
+        // auto closest_nodes = find_closest_nodes(key);
+        // forgeDHTFindNodeReply(connectInfo, rpc_id, closest_nodes);
+    }
+}
+
+// TODO: following functions even necessary? Should answers be waited upon in the respective switch-cases?
+void handleDHTRPCPingReply(const ConnectionInfo& connectInfo) {
+}
+
+void handleDHTRPCStoreReply(const ConnectionInfo& connectInfo) {
+}
+
+void handleDHTRPCFindNodeReply(const ConnectionInfo& connectInfo) {
+}
+
+void handleDHTRPCFindValueReply(const ConnectionInfo& connectInfo) {
+}
+
+void handleDHTError(const ConnectionInfo& connectInfo) {
+    const size_t error_type_offset = HEADERSIZE;
+    // TODO: extract error type, switch case based on that
+}
+
+
+
 
 ProcessingStatus tryProcessing(socket_t curfd){
     //retreive information for element to process:
@@ -295,7 +392,6 @@ ProcessingStatus tryProcessing(socket_t curfd){
 }
 
 
-#ifndef TESTING
 
 int main(int argc, char const *argv[])
 {
@@ -344,108 +440,117 @@ int main(int argc, char const *argv[])
         return -1;
     }
 
-    // Setting up Routing Table
-    //auto routing_table = RoutingTable(generateRandomNodeID(), host, port);
-
-    // std::cout << "Host: " << "127.0.0.1" << "\n"
-    //           << "Port: " << port << "\n"
-    //           << "NodeID" << key_to_string(routing_table.get_node_id()) << "\n";
-    
-    //start_accepting(acceptor);
-    bool serverIsRunning = true;
-
-    static constexpr int ONE = 1;
-    socket_t serversocket = socket(AF_INET6,SOCK_STREAM,0);
-    
-    setsockopt(serversocket,SOL_SOCKET,SO_REUSEPORT,&ONE,sizeof(ONE));
-    setsockopt(serversocket,SOL_SOCKET,SO_KEEPALIVE,&ONE,sizeof(ONE));
-
-    sockaddr_in6 sock_addr;
-    sock_addr.sin6_family = AF_INET6;
-    sock_addr.sin6_port = htons(DHTServerConfig::DHT_PORT);
-    sock_addr.sin6_addr = in6addr_any;
-    bind(serversocket,reinterpret_cast<sockaddr*>(&sock_addr),sizeof(sock_addr)); //TODO Error-checking
-    listen(serversocket,128);
-
-    auto epollfd = epoll_create1(0);
-    //TODO SSL
-
-    auto epollEvent = epoll_event{};
-    epollEvent.events = EPOLLIN;
-    epollEvent.data.fd = serversocket;
-    epoll_ctl(epollfd,EPOLL_CTL_ADD,serversocket,&epollEvent);
+    socket_t serversocket = setupSocket(DHTServerConfig::DHT_PORT);
+    int epollfd = setupEpoll(serversocket);
     std::vector<epoll_event> eventsPerLoop{64};
+    // TODO:
+    // switch: either
+    // 1. join existing network -> we need an ip/ip list which we can ask
+    // 2. create new network
+    // finally: in both cases, to create a network, we need a way to exchange triples 
+    // first: setup RPC messages, to make "joining" possible by sending a "FIND_NODE" to the contact
+    // then, for case 1 we need Node A to send FIND_NODE to node B that receives a triple from A or how does A present itself to B? 
+    runEventLoop(serversocket, epollfd, eventsPerLoop);
 
-    //NEW
-    while(serverIsRunning){
-        int eventCount = epoll_wait(epollfd,eventsPerLoop.data(),std::ssize(eventsPerLoop),-1); //dangerous cast
-        //TODO: ADD SERVER MAINTAINENCE. purge storage (ttl), peer-ttl (k-bucket maintainence)
-        //internal management
-        //clean up local_storage
-        //for all keys, std::erase if ttl is outdated
+    return 0;
+}
 
-        if (eventCount == -1){
+void runEventLoop(socket_t serversocket, int epollfd,
+                  std::vector<epoll_event> &eventsPerLoop) {
+    bool serverIsRunning = true;
+    while (serverIsRunning) {
+        int eventCount = epoll_wait(epollfd, eventsPerLoop.data(), std::ssize(eventsPerLoop), -1);  // dangerous cast
+        // TODO: ADD SERVER MAINTAINENCE. purge storage (ttl), peer-ttl (k-bucket
+        // maintainence) internal management clean up local_storage for all keys,
+        // std::erase if ttl is outdated
+
+        if (eventCount == -1) {
             serverIsRunning = false;
             break;
         }
-        for(int i = 0; i < eventCount; ++i){
+        for (int i = 0; i < eventCount; ++i) {
             auto curEvent = eventsPerLoop[i];
-            if(curEvent.data.fd == serversocket){
-                //accept new client connections from serverside
-                socket_t client_socket = accept4(curEvent.data.fd,nullptr,nullptr,SOCK_NONBLOCK);
-                if(!client_socket){
-                    //Accept-Error
+            if (curEvent.data.fd == serversocket) {
+                // accept new client connections from serverside
+                socket_t client_socket = accept4(curEvent.data.fd, nullptr, nullptr, SOCK_NONBLOCK);
+                if (!client_socket) {
+                    // Accept-Error
                     continue;
                 }
                 auto epollEvent = epoll_event{};
                 epollEvent.events = EPOLLIN | EPOLLOUT | EPOLLERR;
                 epollEvent.data.fd = client_socket;
-                epoll_ctl(epollfd,EPOLL_CTL_ADD,client_socket,&epollEvent);
-            }else{
-                //handle client processing of existing seassions
-                if(curEvent.events & EPOLLIN){
-                    std::array<char,4096> recv_buf{};
+                epoll_ctl(epollfd, EPOLL_CTL_ADD, client_socket, &epollEvent);
+            } else {
+                // handle client processing of existing seassions
+                if (curEvent.events & EPOLLIN) {
+                    std::array<unsigned char, 4096> recv_buf{};
                     auto curfd = curEvent.data.fd;
-                    if(!connectionMap.contains(curfd)){
-                        connectionMap.insert_or_assign(curfd,ConnectionInfo{});
+                    if (!connectionMap.contains(curfd)) {
+                        connectionMap.insert_or_assign(curfd, ConnectionInfo{});
                     }
                     auto &connectionBuffer = connectionMap.at(curfd).receivedBytes;
-                    while(true){
-                        //This loop is used in order to pull all bytes that 
-                        //reside already on this machine in the kernel socket buffer.
-                        //once this exausts, we try processing.
-                        auto bytesRead = read(curfd,recv_buf.data(),recv_buf.size());
-                        if(bytesRead==0){
+                    while (true) {
+                        // This loop is used in order to pull all bytes that
+                        // reside already on this machine in the kernel socket buffer.
+                        // once this exausts, we try processing.
+                        auto bytesRead = read(curfd, recv_buf.data(), recv_buf.size());
+                        if (bytesRead == 0) {
                             bool processingStatus = tryProcessing(curfd);
-                            std::cout << "Processing finished: " << processingStatus << std::endl;
-                            if(processingStatus == true){
-                                //epoll_ctl(epollfd,EPOLL_CTL_DEL,curfd,nullptr);
+                            std::cout << "Processing finished: " << processingStatus
+                                      << std::endl;
+                            if (processingStatus == true) {
+                                // epoll_ctl(epollfd,EPOLL_CTL_DEL,curfd,nullptr);
                             }
                             break;
-                        }
-                        else if (bytesRead == -1){
-                            epoll_ctl(epollfd,EPOLL_CTL_DEL,curfd,nullptr);
+                        } else if (bytesRead == -1) {
+                            epoll_ctl(epollfd, EPOLL_CTL_DEL, curfd, nullptr);
                             connectionMap.erase(curfd);
                             break;
                         }
-                        connectionBuffer.insert(connectionBuffer.end(),recv_buf.begin(), recv_buf.begin() + bytesRead);
+                        connectionBuffer.insert(connectionBuffer.end(), recv_buf.begin(),
+                                                recv_buf.begin() + bytesRead);
 
-                        std::cout << std::string_view(recv_buf.data(),bytesRead) << "\n";
+                        std::cout << std::string_view(reinterpret_cast<const char *>(recv_buf.data()), bytesRead) << "\n";
                     }
                 }
-                if(curEvent.events & EPOLLOUT){
-                    //partial output. Send rest of answer
+                if (curEvent.events & EPOLLOUT) {
+                    // partial output. Send rest of answer
                 }
-                if(curEvent.events & EPOLLERR){
-                    epoll_ctl(epollfd,EPOLL_CTL_DEL,curEvent.data.fd,nullptr);
+                if (curEvent.events & EPOLLERR) {
+                    epoll_ctl(epollfd, EPOLL_CTL_DEL, curEvent.data.fd, nullptr);
                     connectionMap.erase(curEvent.data.fd);
                     continue;
                 }
             }
         }
     }
-
-    return 0;
 }
 
-#endif
+int setupEpoll(socket_t serversocket) {
+    int epollfd = epoll_create1(0);
+    // TODO SSL
+
+    auto epollEvent = epoll_event{};
+    epollEvent.events = EPOLLIN;
+    epollEvent.data.fd = serversocket;
+    epoll_ctl(epollfd, EPOLL_CTL_ADD, serversocket, &epollEvent);
+    return epollfd;
+}
+
+socket_t setupSocket(u_short port) {
+    static constexpr int ONE = 1;
+    socket_t serversocket = socket(AF_INET6, SOCK_STREAM, 0);
+
+    setsockopt(serversocket, SOL_SOCKET, SO_REUSEPORT, &ONE, sizeof(ONE));
+    setsockopt(serversocket, SOL_SOCKET, SO_KEEPALIVE, &ONE, sizeof(ONE));
+
+    sockaddr_in6 sock_addr;
+    sock_addr.sin6_family = AF_INET6;
+    sock_addr.sin6_port = htons(port);
+    sock_addr.sin6_addr = in6addr_any;
+    bind(serversocket, reinterpret_cast<sockaddr *>(&sock_addr),
+         sizeof(sock_addr));  // TODO Error-checking
+    listen(serversocket, 128);
+    return serversocket;
+}
