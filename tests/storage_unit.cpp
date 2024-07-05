@@ -33,8 +33,7 @@ TEST_CASE(
     "get_from_storage does not fail and returns empty optional when key is not "
     "available",
     "[dht_server]") {
-  keyType key;
-  REQUIRE_NOTHROW(key.at(32) = 0x80);
+  keyType key{0x1};
   REQUIRE(!get_from_storage(key).has_value());
 }
 
