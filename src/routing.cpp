@@ -1,81 +1,61 @@
 #include "routing.h"
 
-//#include <print>
+#include <netinet/in.h>
+
+// #include <print>
 
 const size_t K = 20;
+const size_t ALPHA = 3;
 
-K_Bucket::K_Bucket() : peers(), replacement_cache() {
+K_Bucket::K_Bucket(const NodeID& start, const NodeID& end)
+    : start(start), end(end), peers(), replacement_cache() {
 }
 
 void K_Bucket::add_peer(const Node& peer) {
-  if (peers.size() < K) {
-    peers.push_back(peer);
-  } else {
-    replacement_cache.push_front(peer);
-  }
+    if (peers.size() < K) {
+        peers.push_back(peer);
+    } else {
+        replacement_cache.push_front(peer);
+    }
+}
+
+NodeID K_Bucket::get_start() {
+    return this->start;
+}
+
+NodeID K_Bucket::get_end() {
+    return this->end;
 }
 
 const std::list<Node>& K_Bucket::get_peers() const {
-  return peers;
+    return peers;
 }
 
-RoutingTable::RoutingTable(const NodeID& id,
-                           const boost::asio::ip::address& ip,
-                           const uint16_t& port)
-    : us({id, ip, port}), bucket_list()  {
-  
+RoutingTable::RoutingTable(const in6_addr& ip, const in_port_t& port,
+                           const NodeID& id)
+    : bucket_list(), local_node({ip, port, id}) {
+    NodeID first_bucket_start;
+    first_bucket_start.fill(0);
+    NodeID first_bucket_end;
+    first_bucket_end.fill(255);
+    bucket_list.push_back(K_Bucket(first_bucket_start, first_bucket_end));
 }
 
-const NodeID& RoutingTable::get_node_id() const {
-  return us.id;
+const Node& RoutingTable::get_local_node() const {
+    return this->local_node;
+}
+
+const std::vector<K_Bucket>& RoutingTable::get_bucket_list() const {
+    return this->bucket_list;
 }
 
 NodeID generateRandomNodeID() {
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_int_distribution<> dis(0, 1);
-  NodeID nodeId;
-  for (size_t i = 0; i < nodeId.size(); ++i) {
-    nodeId[i] = dis(gen);
-  }
-  return nodeId;
-}
-
-// You can keep your main function here if you want to test the routing
-// functionality
-/*
-int main() {
-    std::println("Starting DHT Storage...");
-
-    boost::asio::io_context io_context;
-
-    DHTServer server(io_context, config);
-
-    NodeID nodeId = generateRandomNodeID();
-
-    keyType key;
-    key.fill(0);
-    key[31] = 1;
-
-    std::vector<uint8_t> value{0x4e, 0x65, 0x76, 0x65, 0x72, 0x20, 0x67,
-                               0x6f, 0x6e, 0x6e, 0x61, 0x20, 0x67, 0x69,
-                               0x76, 0x65, 0x20, 0x79, 0x6f, 0x75, 0x20,
-                               0x75, 0x70, 0x20, 0x0a};
-    save_to_storage(key, value);
-
-    auto retrieved_value = get_from_storage(key);
-    if (retrieved_value) {
-        std::println("Retrieved value:");
-        for (const auto& byte : *retrieved_value) {
-            std::print("{}", static_cast<char>(byte));
-        }
-        std::println("");
-    } else {
-        std::println("Value not found");
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, 255);
+    NodeID nodeId;
+    for (size_t i = 0; i < nodeId.size(); ++i) {
+        nodeId[i] = dis(gen);
     }
-
-    server.run();
-
-    return 0;
+    return nodeId;
 }
-*/

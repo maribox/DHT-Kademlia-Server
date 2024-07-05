@@ -14,7 +14,6 @@ list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras) #necessary for includ
 include(CTest)
 include(Catch)
 
-
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -26,16 +25,19 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0") # Add -O0 flag for 
 
 find_package(Boost REQUIRED COMPONENTS program_options)
 
-add_executable(testing ${TEST_DIR}/storage_unit.cpp )
 add_executable(dht_server_wo_boost ${SOURCE_DIR}/dht_server_wo_boost.cpp)
+add_executable(testing ${TEST_DIR}/storage_unit.cpp)
+add_executable(routing_tests ${TEST_DIR}/routing_unit.cpp ${SOURCE_DIR}/routing.cpp)
 
 target_include_directories(dht_server_wo_boost PRIVATE ${Boost_INCLUDE_DIRS})
 
 target_compile_options(dht_server_wo_boost PRIVATE -g -no-pie)
 target_compile_definitions(dht_server_wo_boost PRIVATE BOOST_STACKTRACE_USE_ADDR2LINE)
+target_compile_options(routing_tests PRIVATE -g)
 
 target_link_libraries(dht_server_wo_boost PRIVATE ${Boost_LIBRARIES})
 target_link_libraries(testing PRIVATE Catch2::Catch2WithMain ${Boost_LIBRARIES})
+target_link_libraries(routing_tests PRIVATE Catch2::Catch2WithMain ${Boost_LIBRARIES})
 
 target_link_options(dht_server_wo_boost PRIVATE -no-pie)
 
@@ -46,3 +48,5 @@ endif()
 
 #Testing
 catch_discover_tests(testing)
+catch_discover_tests(routing_tests)
+
