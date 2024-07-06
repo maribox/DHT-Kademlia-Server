@@ -1,4 +1,6 @@
-#define CATCH_CONFIG_MAIN
+#ifndef TESTING
+  #define TESTING
+#endif
 
 #include <catch2/catch_test_macros.hpp>
 #include <random>
@@ -23,9 +25,28 @@ TEST_CASE("save_to_storage inserts and get_from_storage extracts correct value",
     }
 }
 
+// sorry den brauchen wir doch lul
+TEST_CASE(
+    "get_from_storage does not fail and returns empty optional when key is not "
+    "available",
+    "[dht_server]") {
+  keyType key;
+  REQUIRE_NOTHROW(key.at(32) = 0x80);
+  REQUIRE(!get_from_storage(key).has_value());
+}
+
+
+/*  probably best to pass stop flag to runEventLoop 
+
 TEST_CASE("starting up server works") {
     socket_t serversocket = setupSocket(DHTServerConfig::DHT_PORT);
     int epollfd = setupEpoll(serversocket);
     std::vector<epoll_event> eventsPerLoop{64};
-    runEventLoop(serversocket, epollfd, eventsPerLoop);
+    std::thread server([&]() {runEventLoop(serversocket, epollfd, eventsPerLoop);});
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    server.join();
+
+    // TODO: figure out if this works
+    REQUIRE(true);
 }
+ */

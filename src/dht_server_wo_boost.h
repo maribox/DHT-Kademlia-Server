@@ -72,6 +72,14 @@ void runEventLoop(socket_t serversocket, int epollfd,
 
 void handleDHTRPCPing(const ConnectionInfo& connectInfo);
 
+void handleDHTPUT(ConnectionInfo& connectInfo);
+
+void handleDHTGET(ConnectionInfo& connectInfo);
+
+void handleDHTSUCCESS(ConnectionInfo& connectInfo);
+
+void handleDHTFAILURE(ConnectionInfo& connectInfo);
+
 void handleDHTRPCStore(const ConnectionInfo& connectInfo);
 
 void handleDHTRPCFindNode(const ConnectionInfo& connectInfo);
@@ -87,3 +95,5 @@ void handleDHTRPCFindNodeReply(const ConnectionInfo& connectInfo);
 void handleDHTRPCFindValueReply(const ConnectionInfo& connectInfo);
 
 void handleDHTError(const ConnectionInfo& connectInfo);
+
+bool convertToIPv6(const std::string& host_string, struct in6_addr& host_address);

@@ -46,6 +46,7 @@ class RoutingTable {
    public:
     void split_bucket();
     RoutingTable(const in6_addr& ip, const in_port_t& port, const NodeID& id = generateRandomNodeID());
+    RoutingTable() = default;
     const Node& get_local_node() const;
     const std::vector<K_Bucket>& get_bucket_list() const;
 };

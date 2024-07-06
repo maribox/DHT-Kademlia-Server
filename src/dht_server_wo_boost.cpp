@@ -41,6 +41,8 @@ static constexpr size_t DEFAULTLIFETIMESEC = 5*60; // 5 minutes in seconds
 std::map<keyType,std::pair<std::chrono::time_point<std::chrono::system_clock>, valueType>> local_storage{};
 std::mutex storage_lock;
 
+RoutingTable routing_table;
+
 bool isInMyRange(keyType key){
     return true;
 }
@@ -140,117 +142,25 @@ bool parseFullRequest(ConnectionInfo &connectInfo, const u_short messageSize, co
     switch (dhtType){
         {
         case DHT_PUT:
-            {   
-                const size_t ttl_offset = HEADERSIZE;
-                const size_t key_offset = ttl_offset + 4;
-                const size_t value_offset = key_offset + KEYSIZE;
-
-                //copy key into local var
-                std::array<unsigned char,KEYSIZE> key;
-                std::copy_n(connectionBuffer.cbegin() + key_offset, KEYSIZE, std::begin(key));
-                
-                if(not isInMyRange(key)){
-                    //todo: Relay!!
-                    //--> Forward put_request with k-bucket table and await answer
-                    //5. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
-                }
-
-                u_short time_to_live = connectionBuffer[ttl_offset + 1];
-                time_to_live <<= 8;
-                time_to_live += connectionBuffer[ttl_offset];
-                if(time_to_live > MAXLIFETIMESEC || time_to_live < MINLIFETIMESEC){
-                    //default time to live, as value is out of lifetime bounds
-                    time_to_live = DEFAULTLIFETIMESEC;
-                }
-
-                unsigned char replication = connectionBuffer[ttl_offset + 2];
-                unsigned char reserved = connectionBuffer[ttl_offset + 3];
-
-                //copy value into local var
-                size_t value_size = connectionBuffer.size() - value_offset;
-                std::vector<unsigned char> value;
-                value.reserve(value_size);
-                std::copy_n(connectionBuffer.cbegin() + value_offset, value_size, std::begin(value));
-
-                save_to_storage(key,std::chrono::seconds(time_to_live),value);
-
-                break;
+            {
+            handleDHTPUT(connectInfo);
+        break;
             }
         case DHT_GET:
             {
-                const size_t key_offset = HEADERSIZE;
-                
-                //copy key into local var
-                std::array<unsigned char,KEYSIZE> key;
-                std::copy_n(connectionBuffer.cbegin() + key_offset, KEYSIZE, std::begin(key));
-                
-                if(not isInMyRange(key)){
-                    //todo: Relay!!
-                    //--> Forward get_request with k-bucket table and await answer
-                    //5. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
-                }
-
-                auto optVal = get_from_storage(key);
-                if(optVal.has_value()){
-                    //local storage hit, forge answer to requesting party:
-                    forgeDHTSuccess(connectInfo,optVal.value());
-
-                    //TODO: Queue send event in epoll, readied if EPOLLOUT
-                    return true;
-                }else{
-                    //local storage hit, forge answer to requesting party:
-                    forgeDHTFailure(connectInfo,optVal.value());
-                    //TODO: Queue send event in epoll, readied if EPOLLOUT
-                    return true;
-                }
-                break;
+            handleDHTGET(connectInfo);
+        break;
             }
         case DHT_SUCCESS:
             {
-                //Currently received a frame for a relayed connection. Now, serve as relaying middlepoint and forward 
-                //message to correct peer (Client/Server, indistinguishable)
-                const size_t key_offset = HEADERSIZE;
-                const size_t value_offset = key_offset + KEYSIZE;
-                //copy key into local var
-                std::array<unsigned char,KEYSIZE> key;
-                std::copy_n(connectionBuffer.begin() + key_offset, KEYSIZE, std::begin(key));
-
-                if(!isInMyRange(key)){
-                    //todo: Relay!!
-                    //--> Forward unmodified dht_success message
-                    //We do not expect any confirmation.
-                    //close connection
-                }
-
-                //todo: Answer (basically same as relay)
-                //--> Forward unmodified dht_success message
-                //We do not expect any confirmation.
-                //close connection
-                break;
-
-                //Close connection (was only for relaying!)
-
+            handleDHTSUCCESS(connectInfo);
+        break;
+            // Close connection (was only for relaying!)
             }
         case DHT_FAILURE:
             {
-                //copy key into dataframe
-                const size_t key_offset = HEADERSIZE;
-                //copy key into local var
-                std::array<unsigned char,KEYSIZE> key;
-                std::copy_n(connectionBuffer.begin() + key_offset, KEYSIZE, std::begin(key));
-
-                if(!isInMyRange(key)){
-                    //todo: Relay!!
-                    //--> Forward unmodified dht_failure message with k-bucket table and DO NOT await answer.
-                    //We do not expect any confirmation.
-                    //close connection
-                }
-
-                //todo: Answer (basically same as relay)
-                //--> Forward unmodified dht_failure message with k-bucket table and DO NOT await answer.
-                //We do not expect any confirmation.
-                //close connection
-                break;
+            handleDHTFAILURE(connectInfo);
+        break;
             }
         case DHT_RPC_PING:
             handleDHTRPCPing(connectInfo);
@@ -286,13 +196,115 @@ bool parseFullRequest(ConnectionInfo &connectInfo, const u_short messageSize, co
     }
     return true;
 }
+void handleDHTFAILURE(ConnectionInfo &connectInfo) {
+    const valueType &connectionBuffer = connectInfo.receivedBytes;
+    // copy key into dataframe
+    const size_t key_offset = HEADERSIZE;
+    // copy key into local var
+    std::array<unsigned char, KEYSIZE> key;
+    std::copy_n(connectionBuffer.begin() + key_offset, KEYSIZE, std::begin(key));
+
+    if (!isInMyRange(key)) {
+        // todo: Relay!!
+        //--> Forward unmodified dht_failure message with k-bucket table and DO NOT await answer.
+        // We do not expect any confirmation.
+        // close connection
+    }
+
+    // todo: Answer (basically same as relay)
+    //--> Forward unmodified dht_failure message with k-bucket table and DO NOT await answer.
+    // We do not expect any confirmation.
+    // close connection
+}
+void handleDHTSUCCESS(ConnectionInfo &connectInfo) {
+    const valueType &connectionBuffer = connectInfo.receivedBytes;
+    // Currently received a frame for a relayed connection. Now, serve as relaying middlepoint and forward
+    // message to correct peer (Client/Server, indistinguishable)
+    const size_t key_offset = HEADERSIZE;
+    const size_t value_offset = key_offset + KEYSIZE;
+    // copy key into local var
+    std::array<unsigned char, KEYSIZE> key;
+    std::copy_n(connectionBuffer.begin() + key_offset, KEYSIZE, std::begin(key));
+
+    if (!isInMyRange(key)) {
+        // todo: Relay!!
+        //--> Forward unmodified dht_success message
+        // We do not expect any confirmation.
+        // close connection
+    }
+
+    // todo: Answer (basically same as relay)
+    //--> Forward unmodified dht_success message
+    // We do not expect any confirmation.
+    // close connection
+}
+void handleDHTGET(ConnectionInfo &connectInfo) {
+    const valueType &connectionBuffer = connectInfo.receivedBytes;
+    const size_t key_offset = HEADERSIZE;
+
+    // copy key into local var
+    std::array<unsigned char, KEYSIZE> key;
+    std::copy_n(connectionBuffer.cbegin() + key_offset, KEYSIZE, std::begin(key));
+
+    if (not isInMyRange(key)) {
+        // todo: Relay!!
+        //--> Forward get_request with k-bucket table and await answer
+        // 5. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
+    }
+
+    auto optVal = get_from_storage(key);
+    if (optVal.has_value()) {
+        // local storage hit, forge answer to requesting party:
+        forgeDHTSuccess(connectInfo, optVal.value());
+
+        // TODO: Queue send event in epoll, readied if EPOLLOUT
+    } else {
+        // local storage hit, forge answer to requesting party:
+        forgeDHTFailure(connectInfo, optVal.value());
+        // TODO: Queue send event in epoll, readied if EPOLLOUT
+    }
+}
+void handleDHTPUT(ConnectionInfo &connectInfo) {
+    const valueType &connectionBuffer = connectInfo.receivedBytes;
+    const size_t ttl_offset = HEADERSIZE;
+    const size_t key_offset = ttl_offset + 4;
+    const size_t value_offset = key_offset + KEYSIZE;
+
+    // copy key into local var
+    std::array<unsigned char, KEYSIZE> key;
+    std::copy_n(connectionBuffer.cbegin() + key_offset, KEYSIZE, std::begin(key));
+
+    if (not isInMyRange(key)) {
+        // todo: Relay!!
+        //--> Forward put_request with k-bucket table and await answer
+        // 5. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
+    }
+
+    u_short time_to_live = connectionBuffer[ttl_offset + 1];
+    time_to_live <<= 8;
+    time_to_live += connectionBuffer[ttl_offset];
+    if (time_to_live > MAXLIFETIMESEC || time_to_live < MINLIFETIMESEC) {
+        // default time to live, as value is out of lifetime bounds
+        time_to_live = DEFAULTLIFETIMESEC;
+    }
+
+    unsigned char replication = connectionBuffer[ttl_offset + 2];
+    unsigned char reserved = connectionBuffer[ttl_offset + 3];
+
+    // copy value into local var
+    size_t value_size = connectionBuffer.size() - value_offset;
+    std::vector<unsigned char> value;
+    value.reserve(value_size);
+    std::copy_n(connectionBuffer.cbegin() + value_offset, value_size, std::begin(value));
+
+    save_to_storage(key, std::chrono::seconds(time_to_live), value);
+}
 void handleDHTRPCPing(const ConnectionInfo& connectInfo) {
     const valueType &connectionBuffer = connectInfo.receivedBytes;
     const size_t rpc_id_offset = HEADERSIZE;
         
     // forgeDHTPingReply(connectInfo, rpc_id);
 }
-
 void handleDHTRPCStore(const ConnectionInfo& connectInfo) {
     const valueType &connectionBuffer = connectInfo.receivedBytes;
     const size_t rpc_id_offset = HEADERSIZE;
@@ -304,7 +316,6 @@ void handleDHTRPCStore(const ConnectionInfo& connectInfo) {
 
     // forgeDHTStoreReply(connectInfo, rpc_id, key, value);
 }
-
 void handleDHTRPCFindNode(const ConnectionInfo& connectInfo) {
     const valueType &connectionBuffer = connectInfo.receivedBytes;
     const size_t rpc_id_offset = HEADERSIZE;
@@ -314,7 +325,6 @@ void handleDHTRPCFindNode(const ConnectionInfo& connectInfo) {
 
     // forgeDHTFindNodeReply(connectInfo, rpc_id, closest_nodes);
 }
-
 void handleDHTRPCFindValue(const ConnectionInfo& connectInfo) {
     const valueType &connectionBuffer = connectInfo.receivedBytes;
     const size_t rpc_id_offset = HEADERSIZE;
@@ -323,7 +333,6 @@ void handleDHTRPCFindValue(const ConnectionInfo& connectInfo) {
     keyType key;
     std::copy_n(connectionBuffer.begin() + key_offset, KEYSIZE, std::begin(key));
 
-    // two questions: cbegin or begin here and std::begin correct?
 
 
     auto optVal = get_from_storage(key);
@@ -391,22 +400,33 @@ ProcessingStatus tryProcessing(socket_t curfd){
     return ProcessingStatus::processed;
 }
 
-
-
+//#ifndef TESTING
 int main(int argc, char const *argv[])
 {
-    u_short port = DHTServerConfig::DHT_PORT;
-    std::string host_string = {};
-
+    u_short host_port = DHTServerConfig::DHT_PORT;
+    std::string host_address_string = {};
+    struct in6_addr host_address{};
+    u_short peer_port = DHTServerConfig::DHT_PORT;
+    std::string peer_address_string = {};
+    struct in6_addr peer_address{};
+    bool create_new_network = false;
     try
     {
         // Argument parsing:
         // Use boost::program_options for parsing:
-        progOpt::options_description desc{"Run a DHT module mockup with local storage.\n\nMultiple API clients can connect to this same instance."};
-        desc.add_options()("help,h", "Help screen")("address,a", progOpt::value<std::string>(&host_string), "Bind server to this address")("port,p", progOpt::value<u_short>(&port), "Bind server to this port")("unreg", "Unrecognized options");
+        progOpt::options_description desc{"Run a DHT module mockup with local storage.\n\nMultiple API clients can connect to this same instance.\nTo connect to an existing network, provide the ip address and port of a peer, otherwise new network will be created."};
+        desc.add_options()("help,h", "Help screen")
+        ("address,a", progOpt::value<std::string>(&host_address_string), "Bind server to this address")
+        ("port,p", progOpt::value<u_short>(&host_port), "Bind server to this port")
+        ("peer-address,A", progOpt::value<std::string>(&peer_address_string), "Try to connect to existing network at this address")
+        ("peer-port,P", progOpt::value<u_short>(&peer_port), "Try to connect to existing network at this port")
+        ("unreg", "Unrecognized options");
+
         progOpt::positional_options_description pos_desc;
         pos_desc.add("address", 1);
         pos_desc.add("port", 1);
+        pos_desc.add("peer-address", 1);
+        pos_desc.add("peer-port", 1);
 
         progOpt::command_line_parser parser{argc, argv};
         parser.options(desc).allow_unregistered().style(progOpt::command_line_style::default_style |
@@ -430,6 +450,22 @@ int main(int argc, char const *argv[])
         {
             //TODO PORT
         }
+        /*
+          throws error:
+         for (auto it = vm.begin(); it != vm.end(); ++it) {
+            std::cout << it->first << " : " << it->second.as<std::string>() << std::endl;
+        }*/
+        if (vm.count("peer-address") && vm.count("peer-port")) {
+            std::cout << "Connecting to existing network at " << peer_address_string << ":" << peer_port << std::endl;
+            if (!convertToIPv6(peer_address_string, peer_address)) {
+                std::cerr << "Please provide a syntactically correct IP address (v4 or v6) for the peer";
+                return 1;
+            }
+        } else {
+            std::cout << "Since no peer to connect to was supplied, setting up new network..." << std::endl;
+            create_new_network = true;
+        }
+
         // Parsing complete
     }
     catch (std::exception excep)
@@ -440,6 +476,11 @@ int main(int argc, char const *argv[])
         return -1;
     }
 
+    if (!convertToIPv6(host_address_string, host_address)) {
+        std::cerr << "Please provide a syntactically correct IP address (v4 or v6) for the host";
+        return 1;
+    }
+
     socket_t serversocket = setupSocket(DHTServerConfig::DHT_PORT);
     int epollfd = setupEpoll(serversocket);
     std::vector<epoll_event> eventsPerLoop{64};
@@ -447,16 +488,51 @@ int main(int argc, char const *argv[])
     // switch: either
     // 1. join existing network -> we need an ip/ip list which we can ask
     // 2. create new network
-    // finally: in both cases, to create a network, we need a way to exchange triples 
+    // finally: in both cases, to create a network, we need a way to exchange triples
     // first: setup RPC messages, to make "joining" possible by sending a "FIND_NODE" to the contact
-    // then, for case 1 we need Node A to send FIND_NODE to node B that receives a triple from A or how does A present itself to B? 
+    // then, for case 1 we need Node A to send FIND_NODE to node B that receives a triple from A or how does A present itself to B?
+
+    routing_table = RoutingTable(host_address, host_port);
+
+    if(!create_new_network) {
+        // TODO: connect to existing network
+        // 1. Add contact node (given with argv, should be in vars "peer_address:peer_port") to k_bucket_list
+        // 2. Send FIND_NODE RPC about our own node to peer (TODO: Don't immediately put our triple in peer's bucket list or else it won't return closer peers but us?)
+        // 3. If response includes our own, we have no closer nodes, otherwise we get closer nodes to us
+        // 4. Iterate over ever closer nodes
+        // 5. Meanwhile, populate K_Buckets with ever closer nodes
+        // 6. For Nodes farther away, do "refreshing" of random NodeID's in the respective ranges
+        //    (choose closest nodes and send them find_node rpcs with the randomly generated NodeID's in said range)
+    }
+
+    char host_address_converted[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6, &host_address, host_address_converted, INET6_ADDRSTRLEN);
+    std::cout << "converted address "  << host_address_string  << " to " << host_address_converted << std::endl;
     runEventLoop(serversocket, epollfd, eventsPerLoop);
 
     return 0;
 }
+//#endif
+
+bool convertToIPv6(const std::string& host_string, struct in6_addr& host_address) {
+    struct in_addr ipv4_addr;
+    if (inet_pton(AF_INET6, host_string.c_str(), &host_address) == 1) {
+        return true;
+    } else if (inet_pton(AF_INET, host_string.c_str(), &ipv4_addr) == 1) {
+        // if IPv4, use IPv4-mapped IPv6 address with format ::ffff:<IPv4-address>
+        memset(&host_address, 0, sizeof(host_address));
+        host_address.s6_addr[10] = 0xff;
+        host_address.s6_addr[11] = 0xff;
+        memcpy(&host_address.s6_addr[12], &ipv4_addr, sizeof(ipv4_addr));
+        return true;
+    }
+    return false;  // Invalid address
+}
+
 
 void runEventLoop(socket_t serversocket, int epollfd,
                   std::vector<epoll_event> &eventsPerLoop) {
+    std::cout << "Server running... " << std::endl;
     bool serverIsRunning = true;
     while (serverIsRunning) {
         int eventCount = epoll_wait(epollfd, eventsPerLoop.data(), std::ssize(eventsPerLoop), -1);  // dangerous cast
