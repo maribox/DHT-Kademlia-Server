@@ -41,6 +41,7 @@ RoutingTable::RoutingTable(const in6_addr& ip, const in_port_t& port,
     bucket_list.push_back(K_Bucket(first_bucket_start, first_bucket_end));
 }
 
+
 const Node& RoutingTable::get_local_node() const {
     return this->local_node;
 }
