@@ -96,4 +96,4 @@ void handleDHTRPCFindValueReply(const ConnectionInfo& connectInfo);
 
 void handleDHTError(const ConnectionInfo& connectInfo);
 
-bool convertToIPv6(const std::string& host_string, struct in6_addr& host_address);
+bool convertToIPv6(const std::string& address_string, struct in6_addr& address);
