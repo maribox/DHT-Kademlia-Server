@@ -409,7 +409,7 @@ int main(int argc, char const *argv[])
     u_short peer_port = DHTServerConfig::DHT_PORT;
     std::string peer_address_string = {};
     struct in6_addr peer_address{};
-    bool create_new_network = false;
+    bool connect_to_existing_network = true;
     try
     {
         // Argument parsing:
@@ -429,8 +429,10 @@ int main(int argc, char const *argv[])
         pos_desc.add("peer-port", 1);
 
         progOpt::command_line_parser parser{argc, argv};
-        parser.options(desc).allow_unregistered().style(progOpt::command_line_style::default_style |
-                                                        progOpt::command_line_style::allow_slash_for_short);
+        parser.options(desc)
+            .allow_unregistered()
+            .positional(pos_desc)
+            .style(progOpt::command_line_style::default_style | progOpt::command_line_style::allow_slash_for_short);
         progOpt::parsed_options parsed_options = parser.run();
 
         progOpt::variables_map vm;
@@ -463,7 +465,7 @@ int main(int argc, char const *argv[])
             }
         } else {
             std::cout << "Since no peer to connect to was supplied, setting up new network..." << std::endl;
-            create_new_network = true;
+            connect_to_existing_network = false;
         }
 
         // Parsing complete
@@ -494,7 +496,7 @@ int main(int argc, char const *argv[])
 
     routing_table = RoutingTable(host_address, host_port);
 
-    if(!create_new_network) {
+    if(connect_to_existing_network) {
         // TODO: connect to existing network
         // 1. Add contact node (given with argv, should be in vars "peer_address:peer_port") to k_bucket_list
         // 2. Send FIND_NODE RPC about our own node to peer (TODO: Don't immediately put our triple in peer's bucket list or else it won't return closer peers but us?)
@@ -503,27 +505,33 @@ int main(int argc, char const *argv[])
         // 5. Meanwhile, populate K_Buckets with ever closer nodes
         // 6. For Nodes farther away, do "refreshing" of random NodeID's in the respective ranges
         //    (choose closest nodes and send them find_node rpcs with the randomly generated NodeID's in said range)
+
+
     }
 
-    char host_address_converted[INET6_ADDRSTRLEN];
-    inet_ntop(AF_INET6, &host_address, host_address_converted, INET6_ADDRSTRLEN);
-    std::cout << "converted address "  << host_address_string  << " to " << host_address_converted << std::endl;
     runEventLoop(serversocket, epollfd, eventsPerLoop);
 
     return 0;
 }
 //#endif
 
-bool convertToIPv6(const std::string& host_string, struct in6_addr& host_address) {
+bool convertToIPv6(const std::string& address_string, struct in6_addr& address) {
     struct in_addr ipv4_addr;
-    if (inet_pton(AF_INET6, host_string.c_str(), &host_address) == 1) {
+    if (inet_pton(AF_INET6, address_string.c_str(), &address) == 1) {
         return true;
-    } else if (inet_pton(AF_INET, host_string.c_str(), &ipv4_addr) == 1) {
+    } else if (inet_pton(AF_INET, address_string.c_str(), &ipv4_addr) == 1) {
         // if IPv4, use IPv4-mapped IPv6 address with format ::ffff:<IPv4-address>
-        memset(&host_address, 0, sizeof(host_address));
-        host_address.s6_addr[10] = 0xff;
-        host_address.s6_addr[11] = 0xff;
-        memcpy(&host_address.s6_addr[12], &ipv4_addr, sizeof(ipv4_addr));
+        memset(&address, 0, sizeof(address));
+        address.s6_addr[10] = 0xff;
+        address.s6_addr[11] = 0xff;
+        memcpy(&address.s6_addr[12], &ipv4_addr, sizeof(ipv4_addr));
+        try {
+            char address_converted[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, &address, address_converted, INET6_ADDRSTRLEN);
+            std::cout << "Converted address "  << address_string  << " to " << address_converted << std::endl;
+        } catch (...) {
+            std::cout << "Converted address " << address_string  << " but couldn't format." << std::endl;
+        }
         return true;
     }
     return false;  // Invalid address
