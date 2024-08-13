@@ -25,8 +25,9 @@ enum ProcessingStatus{
     error = 1<<4
 };
 
-namespace DHTServerConfig {
-    static constexpr u_short DHT_PORT = 7401;
+namespace ServerConfig {
+    static constexpr u_short MODULE_API_PORT = 7401;
+    static constexpr u_short P2P_PORT = 7402;
 };
 
 struct ConnectionInfo{
@@ -65,10 +66,10 @@ int parse_commandline_args(int argc, const char* argv[]);
 
 socket_t setupSocket(u_short port);
 
-int setupEpoll(socket_t serversocket);
+int setupEpoll(int epollfd, socket_t serversocket);
 
-void runEventLoop(socket_t serversocket, int epollfd,
-                  std::vector<epoll_event>& eventsPerLoop);
+void runEventLoop(socket_t module_api_socket, socket_t p2p_socket, int epollfd,
+                  std::vector<epoll_event>& epoll_events);
 
 void handleDHTRPCPing(const ConnectionInfo& connectInfo);
 
