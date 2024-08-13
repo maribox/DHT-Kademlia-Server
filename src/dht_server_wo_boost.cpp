@@ -403,13 +403,14 @@ ProcessingStatus tryProcessing(socket_t curfd){
 //#ifndef TESTING
 int main(int argc, char const *argv[])
 {
-    u_short host_port = DHTServerConfig::DHT_PORT;
+    u_short host_port = ServerConfig;
     std::string host_address_string = {};
     struct in6_addr host_address{};
-    u_short peer_port = DHTServerConfig::DHT_PORT;
+    u_short peer_port = 0;
     std::string peer_address_string = {};
     struct in6_addr peer_address{};
     bool connect_to_existing_network = true;
+
     try
     {
         // Argument parsing:
@@ -483,9 +484,16 @@ int main(int argc, char const *argv[])
         return 1;
     }
 
-    socket_t serversocket = setupSocket(DHTServerConfig::DHT_PORT);
-    int epollfd = setupEpoll(serversocket);
-    std::vector<epoll_event> eventsPerLoop{64};
+    // Open port for local API traffic from modules
+    socket_t module_api_socket = setupSocket(ServerConfig::MODULE_API_PORT);
+    int epollfd = setupEpoll(epoll_create1(0), module_api_socket);
+
+    // Open second port for (usually remote) Kademlia traffic
+    socket_t p2p_socket = setupSocket(ServerConfig::P2P_PORT);
+    int p2p_epollfd = setupEpoll(epollfd, p2p_socket);
+
+    std::vector<epoll_event> epoll_events{64};
+
     // TODO:
     // switch: either
     // 1. join existing network -> we need an ip/ip list which we can ask
@@ -494,9 +502,13 @@ int main(int argc, char const *argv[])
     // first: setup RPC messages, to make "joining" possible by sending a "FIND_NODE" to the contact
     // then, for case 1 we need Node A to send FIND_NODE to node B that receives a triple from A or how does A present itself to B?
 
+
     routing_table = RoutingTable(host_address, host_port);
 
     if(connect_to_existing_network) {
+
+
+
         // TODO: connect to existing network
         // 1. Add contact node (given with argv, should be in vars "peer_address:peer_port") to k_bucket_list
         // 2. Send FIND_NODE RPC about our own node to peer (TODO: Don't immediately put our triple in peer's bucket list or else it won't return closer peers but us?)
@@ -506,10 +518,9 @@ int main(int argc, char const *argv[])
         // 6. For Nodes farther away, do "refreshing" of random NodeID's in the respective ranges
         //    (choose closest nodes and send them find_node rpcs with the randomly generated NodeID's in said range)
 
-
     }
 
-    runEventLoop(serversocket, epollfd, eventsPerLoop);
+    runEventLoop(module_api_socket, p2p_socket, epollfd, epoll_events);
 
     return 0;
 }
@@ -538,12 +549,12 @@ bool convertToIPv6(const std::string& address_string, struct in6_addr& address) 
 }
 
 
-void runEventLoop(socket_t serversocket, int epollfd,
-                  std::vector<epoll_event> &eventsPerLoop) {
+void runEventLoop(socket_t module_api_socket, socket_t p2p_socket, int epollfd,
+                  std::vector<epoll_event> &epoll_events) {
     std::cout << "Server running... " << std::endl;
     bool serverIsRunning = true;
     while (serverIsRunning) {
-        int eventCount = epoll_wait(epollfd, eventsPerLoop.data(), std::ssize(eventsPerLoop), -1);  // dangerous cast
+        int eventCount = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), -1);  // dangerous cast
         // TODO: ADD SERVER MAINTAINENCE. purge storage (ttl), peer-ttl (k-bucket
         // maintainence) internal management clean up local_storage for all keys,
         // std::erase if ttl is outdated
@@ -553,8 +564,8 @@ void runEventLoop(socket_t serversocket, int epollfd,
             break;
         }
         for (int i = 0; i < eventCount; ++i) {
-            auto curEvent = eventsPerLoop[i];
-            if (curEvent.data.fd == serversocket) {
+            auto curEvent = epoll_events[i];
+            if (curEvent.data.fd == module_api_socket) {
                 // accept new client connections from serverside
                 socket_t client_socket = accept4(curEvent.data.fd, nullptr, nullptr, SOCK_NONBLOCK);
                 if (!client_socket) {
@@ -611,8 +622,7 @@ void runEventLoop(socket_t serversocket, int epollfd,
     }
 }
 
-int setupEpoll(socket_t serversocket) {
-    int epollfd = epoll_create1(0);
+int setupEpoll(int epollfd, socket_t serversocket) {
     // TODO SSL
 
     auto epollEvent = epoll_event{};

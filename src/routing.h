@@ -44,6 +44,7 @@ class RoutingTable {
     Node local_node;
 
    public:
+    void add_peer(const Node& peer);
     void split_bucket();
     RoutingTable(const in6_addr& ip, const in_port_t& port, const NodeID& id = generateRandomNodeID());
     RoutingTable() = default;
