@@ -27,7 +27,10 @@ find_package(Boost REQUIRED COMPONENTS program_options)
 
 add_executable(dht_server_wo_boost ${SOURCE_DIR}/dht_server_wo_boost.cpp ${SOURCE_DIR}/routing.cpp)
 add_executable(testing ${TEST_DIR}/storage_unit.cpp)
-add_executable(routing_tests ${TEST_DIR}/routing_unit.cpp ${SOURCE_DIR}/routing.cpp)
+add_executable(routing_tests ${TEST_DIR}/routing_unit.cpp ${SOURCE_DIR}/routing.cpp ${SOURCE_DIR}/dht_server_wo_boost.cpp)
+
+# shouldn't be necessary, but somehow doesn't work when removed
+target_compile_definitions(routing_tests PRIVATE TESTING)
 
 target_include_directories(dht_server_wo_boost PRIVATE ${Boost_INCLUDE_DIRS})
 

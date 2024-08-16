@@ -1,11 +1,18 @@
 #include "routing.h"
+#include "dht_server_wo_boost.h"
 
+#include <iostream>
 #include <netinet/in.h>
 
 // #include <print>
 
 const size_t K = 20;
 const size_t ALPHA = 3;
+
+//TODO: Is this enough?
+bool operator==(const Node& lhs, const Node& rhs) {
+    return lhs.id == rhs.id;
+}
 
 K_Bucket::K_Bucket(const NodeID& start, const NodeID& end)
     : start(start), end(end), peers(), replacement_cache() {
@@ -37,11 +44,11 @@ bool K_Bucket::add_peer(const Node &peer) { // returns true if inserted or alrea
     }
 }
 
-NodeID K_Bucket::get_start() {
+NodeID K_Bucket::get_start() const {
     return this->start;
 }
 
-NodeID K_Bucket::get_end() {
+NodeID K_Bucket::get_end() const {
     return this->end;
 }
 
@@ -68,7 +75,7 @@ int RoutingTable::get_shared_prefix_bits(K_Bucket bucket) {
         auto end_byte = bucket.get_end()[byte_no]; // e.g. 0011.1111 -> depth would be 4
 
         // bit_no represents positiion with value 2^i of byte
-        for (auto bit_no = 0; bit_no < 8; bit_no++) {
+        for (auto bit_no = 7; bit_no >= 0; bit_no--) {
             bool start_bit = ((1 << bit_no) & start_byte) != 0;
             bool end_bit = ((1 << bit_no) & end_byte) != 0;
             if (start_bit == end_bit) {
@@ -82,9 +89,44 @@ int RoutingTable::get_shared_prefix_bits(K_Bucket bucket) {
     return shared_prefix_bits;
 }
 
+void RoutingTable::split_bucket(K_Bucket bucket, int depth) {
+    // e.g. // e.g. 110|0|000 - // e.g. 110|1|111 -> depth == index of bit to switch, in this example 3
+    auto start_first = bucket.get_start(); // e.g. 110|0|000
+
+    auto byte_no = depth / 8;
+    auto bit_no = 7 - depth % 8; // again, position worth 2^bit_no
+    auto end_first = bucket.get_end(); // e.g. 110|0|111 -> we flip byte_no bit of end
+    end_first[byte_no] = end_first[byte_no] ^ (1 << bit_no);
+    auto start_second = bucket.get_start(); // e.g. 110|1|000 -> we flip byte_no bit of start
+    start_second[byte_no] = start_second[byte_no] ^ (1 << bit_no);
+    auto end_second = bucket.get_end(); // e.g. 110|1|111
+    K_Bucket first(start_first, end_first);
+    K_Bucket second(start_second, end_second);
+
+    for (auto peer : bucket.get_peers()) {
+        if (peer.id <= first.get_end()) {
+            first.add_peer(peer);
+        } else {
+            second.add_peer(peer);
+        }
+    }
+
+    auto it = std::find(bucket_list.cbegin(), bucket_list.cend(), bucket);
+    if (it == bucket_list.cend()) {
+        std::cerr << "Provided a bucket not in the bucket list" << std::endl;
+        return;
+    } else {
+        bucket_list.erase(it);
+        bucket_list.insert(it, second);
+        bucket_list.insert(it, first);
+    }
+}
+
+
+
 //TODO: implement this. look at sections 2.2, 2.4, 4.2
 void RoutingTable::add_peer(const Node& peer) {
-    for (auto bucket : bucket_list) {
+    for (auto& bucket : bucket_list) {
         if (bucket.get_start() <= peer.id  && peer.id <= bucket.get_end()) {
         // according to 2.4: "When u learns of a new contact, it  attempts to insert the contact in the appropriate k-bucket.
         // If that bucket  is  not full, the new contact is simply inserted. Otherwise, if the k-bucket’s range  includes u’s
@@ -92,11 +134,14 @@ void RoutingTable::add_peer(const Node& peer) {
         // insertion attempt repeated. If a  k-bucket with a different range is full, the new contact is simply dropped"
 
         // according to 4.2: "The general splitting rule is that a node splits a full k-bucket if the  bucket’s range contains
-        // the node’s own ID or the depth d of the k-bucket in the  routing tree satisfies  d !     ≡ 0 (mod 6). (The depth is just
+        // the node’s own ID or the depth d of the k-bucket in the  routing tree satisfies  d !≡ 0 (mod b). (The depth is just
         // the length of the prefix  shared by all nodes in the k-bucket’s range.) The current implementation uses  b=5."
             if (!bucket.add_peer(peer)) {
                 int depth = get_shared_prefix_bits(bucket);
-                // TODO: WHY could the bucket not contain the peer's ID if we checked that earlier???
+                if ((bucket.get_start() <= this->local_node.id && this->local_node.id <= bucket.get_end())
+                    || depth % 5 == 0) {
+                    split_bucket(bucket, depth);
+                }
             }
         }
     }

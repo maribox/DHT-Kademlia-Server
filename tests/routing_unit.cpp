@@ -51,4 +51,45 @@ TEST_CASE("RoutingTable", "[routing]") {
         }
         REQUIRE(bucket.get_peers().empty());
     }
+    SECTION("RoutingTable add peer") {
+        NodeID peerID;
+        peerID.fill(0);
+        peerID[0] = 1;
+        Node peer = {in6addr_loopback, ServerConfig::P2P_PORT + 2, peerID};
+
+        routing_table.add_peer(peer);
+        auto& peers = routing_table.get_bucket_list().at(0).get_peers();
+        REQUIRE(peers.size() == 1);
+        auto it = peers.begin();
+        REQUIRE(compare_in6_addr(it->addr, in6addr_loopback));
+        REQUIRE(it->port == ServerConfig::P2P_PORT + 2);
+        REQUIRE(it->id == peerID);
+    }
+    SECTION("RoutingTable Split Bucket") {
+        for (int i = 0; i < K + 1; i++) {
+            Node peer = {in6addr_loopback, static_cast<u_short> (ServerConfig::P2P_PORT + 2 + i), generateRandomNodeID()};
+            routing_table.add_peer(peer);
+        }
+        auto& buckets = routing_table.get_bucket_list();
+        REQUIRE(buckets.size() == 2);
+        REQUIRE(buckets.at(0).get_peers().size() + buckets.at(1).get_peers().size() == K);
+        auto first_start = std::array<unsigned char, KEYSIZE>{};
+        first_start.fill(0);
+        REQUIRE(buckets.at(0).get_start() == first_start);
+        auto first_end = std::array<unsigned char, KEYSIZE>{};
+        first_end.fill(0xff);
+        first_end[0] = 0x7f;
+        REQUIRE(buckets.at(0).get_end() == first_end);
+        auto second_start = std::array<unsigned char, KEYSIZE>{};
+        second_start.fill(0);
+        second_start[0] = 0x80;
+        REQUIRE(buckets.at(1).get_start() == second_start);
+        auto second_end = std::array<unsigned char, KEYSIZE>{};
+        second_end.fill(0xff);
+        REQUIRE(buckets.at(1).get_end() == second_end);
+    }
 }
+
+
+
+
