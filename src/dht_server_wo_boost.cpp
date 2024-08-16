@@ -47,6 +47,27 @@ bool isInMyRange(keyType key){
     return true;
 }
 
+bool operator<=(const keyType& lhs, const keyType& rhs) {
+    for (size_t i = 0; i < KEYSIZE; ++i) {
+        if (lhs[i] < rhs[i]) {
+            return true;
+        }
+        if (lhs[i] > rhs[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool operator==(const keyType& lhs, const keyType& rhs) {
+    for (size_t i = 0; i < KEYSIZE; ++i) {
+        if (lhs[i] != rhs[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::string key_to_string(const keyType &key) {
     std::string str{};
         
@@ -400,10 +421,10 @@ ProcessingStatus tryProcessing(socket_t curfd){
     return ProcessingStatus::processed;
 }
 
-//#ifndef TESTING
+#ifndef TESTING
 int main(int argc, char const *argv[])
 {
-    u_short host_port = ServerConfig;
+    u_short host_port = ServerConfig::MODULE_API_PORT;
     std::string host_address_string = {};
     struct in6_addr host_address{};
     u_short peer_port = 0;
@@ -524,7 +545,7 @@ int main(int argc, char const *argv[])
 
     return 0;
 }
-//#endif
+#endif
 
 bool convertToIPv6(const std::string& address_string, struct in6_addr& address) {
     struct in_addr ipv4_addr;

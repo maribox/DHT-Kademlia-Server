@@ -14,6 +14,8 @@ using keyType = std::array<unsigned char,KEYSIZE>;
 using valueType = std::vector<unsigned char>;
 using socket_t  = int;
 
+bool operator<=(const keyType& lhs, const keyType& rhs);
+
 std::string key_to_string(const keyType& key);
 
 enum ProcessingStatus{

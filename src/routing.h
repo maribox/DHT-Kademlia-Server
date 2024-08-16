@@ -30,10 +30,12 @@ class K_Bucket {
 
    public:
     K_Bucket(const NodeID& start, const NodeID& end);
-
+    bool operator==(const K_Bucket& other) const {
+        return this->start == other.start && this->end == other.end;
+    }
     bool add_peer(const Node &peer);
-    NodeID get_start();
-    NodeID get_end();
+    NodeID get_start() const;
+    NodeID get_end() const;
     const std::list<Node>& get_peers() const;
 };
 
@@ -49,6 +51,9 @@ class RoutingTable {
     void split_bucket();
     RoutingTable(const in6_addr& ip, const in_port_t& port, const NodeID& id = generateRandomNodeID());
     int get_shared_prefix_bits(K_Bucket bucket);
+
+    void split_bucket(K_Bucket bucket, int depth);
+
     RoutingTable() = default;
     const Node& get_local_node() const;
     const std::vector<K_Bucket>& get_bucket_list() const;
