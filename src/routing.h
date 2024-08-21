@@ -13,7 +13,7 @@ extern const size_t K;
 
 using IpAddress = std::string;
 using UDP_Port = uint16_t;
-using NodeID = keyType;
+using NodeID = key_type;
 
 struct Node {
     in6_addr addr;
