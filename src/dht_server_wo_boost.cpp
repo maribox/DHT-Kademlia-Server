@@ -47,6 +47,18 @@ bool isInMyRange(key_type key){
     return true;
 }
 
+bool operator<(const key_type& lhs, const key_type& rhs) {
+    for (size_t i = 0; i < KEYSIZE; ++i) {
+        if (lhs[i] < rhs[i]) {
+            return true;
+        }
+        if (lhs[i] > rhs[i]) {
+            return false;
+        }
+    }
+    return false;
+}
+
 bool operator<=(const key_type& lhs, const key_type& rhs) {
     for (size_t i = 0; i < KEYSIZE; ++i) {
         if (lhs[i] < rhs[i]) {
@@ -340,8 +352,14 @@ void handleDHTRPCFindNode(const ConnectionInfo& connectInfo) {
     const size_t rpc_id_offset = HEADERSIZE;
     const size_t node_id_offset = rpc_id_offset + 32;
 
-    // find closest nodes, then return them:
+    NodeID target_node_id;
+    std::copy_n(connectionBuffer.begin() + node_id_offset, KEYSIZE, std::begin(target_node_id));
+    // TODO: which is better here? copy or copy_n?
+    // why does the following not work:
+    // std::copy(target_node_id.begin(), target_node_id.end(), connectionBuffer.begin() + node_id_offset);
 
+    // find closest nodes, then return them:
+    auto closest_nodes = routing_table.find_closest_nodes(target_node_id);
     // forgeDHTFindNodeReply(connectInfo, rpc_id, closest_nodes);
 }
 void handleDHTRPCFindValue(const ConnectionInfo& connectInfo) {
@@ -473,9 +491,10 @@ bool send_rpc_ping(socket_t socket) {
     size_t message_size = HEADERSIZE + 32;
     u_short message_type = DHT_RPC_PING;
     message_t message(message_size);
+
     build_dht_header(message_size, message_type, message);
 
-    for (size_t i = 0; i < 32; ++i) {
+    for (size_t i = 0; i < 32; i++) {
         message[HEADERSIZE + i] = rpc_id[i];
     }
 
@@ -484,8 +503,31 @@ bool send_rpc_ping(socket_t socket) {
     return send_dht_message(socket, message);
 }
 
+bool send_rpc_find_node(socket_t socket, NodeID node_id) {
+    key_type rpc_id = generateRandomNodeID();
 
-//  #ifndef TESTING
+    size_t message_size = HEADERSIZE + 32 + 32;
+    u_short message_type = DHT_RPC_PING;
+    message_t message(message_size);
+
+    build_dht_header(message_size, message_type, message);
+
+    for (size_t i = 0; i < 32; i++) {
+        message[HEADERSIZE + i] = rpc_id[i];
+    }
+
+    for (size_t i = 0; i < 32; i++) {
+        message[HEADERSIZE + i] = node_id[i];
+    }
+
+    connectionMap.at(socket).rpc_id = rpc_id;
+
+    return send_dht_message(socket, message);
+}
+
+
+
+#ifndef TESTING
 int main(int argc, char const *argv[])
 {
     // Own address
@@ -586,13 +628,12 @@ int main(int argc, char const *argv[])
 
     if(connect_to_existing_network) {
         // TODO: connect to existing network
-        // 0. Send Ping request to known node, which responds with it's NodeID
         // TODO: setup socket + add to connectionMap, then call:
-        // send_rpc_ping(socket), then in handlePingReply piggyback nodeid in reply if the sender (us) is new to the receiver (peer)
-        // then if nodeid is in the message (new message type or alternatively all 0 for all others? -> ask joern) do next steps:
-        // alternatively, we could also send a DHTRPCFindNodeReply or just a HTRPCFindNode instead of ping.
-        // yeah maybe that's actually smarter...
+        std::cout << "Sending Find Node Request..." << std::endl;
+        socket_t peer_socket = setupConnectSocket(peer_address_string, peer_port);
+        send_rpc_find_node(peer_socket, routing_table.get_local_node().id);
         // 1. Send FIND_NODE RPC about our own node to peer (TODO: Don't immediately put our triple in peer's bucket list or else it won't return closer peers but us?)
+
         // 3. If response includes our own, we have no closer nodes, otherwise we get closer nodes to us
         // 4. Iterate over ever closer nodes
         // 5. Meanwhile, populate K_Buckets with ever closer nodes
@@ -603,15 +644,15 @@ int main(int argc, char const *argv[])
 
     // Open port for local API traffic from modules
 
-    socket_t module_api_socket = setupSocket(ServerConfig::MODULE_API_PORT);
+    socket_t module_api_socket = setupServerSocket(ServerConfig::MODULE_API_PORT);
     int epollfd = setupEpoll(epoll_create1(0), module_api_socket);
-    socket_t p2p_socket = setupSocket(ServerConfig::P2P_PORT);
+    socket_t p2p_socket = setupServerSocket(ServerConfig::P2P_PORT);
     std::vector<epoll_event> epoll_events{64};
     runEventLoop(module_api_socket, p2p_socket, epollfd, epoll_events);
 
     return 0;
 }
-//#endif
+#endif
 
 bool convertToIPv6(const std::string& address_string, struct in6_addr& address) {
     struct in_addr ipv4_addr;
@@ -728,7 +769,7 @@ int setupEpoll(int epollfd, socket_t serversocket) {
     return epollfd;
 }
 
-socket_t setupSocket(u_short port) {
+socket_t setupServerSocket(u_short port) {
     static constexpr int ONE = 1;
     socket_t serversocket = socket(AF_INET6, SOCK_STREAM, 0);
 
@@ -743,4 +784,29 @@ socket_t setupSocket(u_short port) {
          sizeof(sock_addr));  // TODO Error-checking
     listen(serversocket, 128);
     return serversocket;
+}
+
+socket_t setupConnectSocket(std::string address_string, u_short port) {
+    socket_t peer_socket = socket(AF_INET6, SOCK_STREAM, 0);
+    if (peer_socket == -1) {
+        std::cerr << "Failed to create client socket" << std::endl;
+        return -1;
+    }
+
+    sockaddr_in6 address{};
+    if (!convertToIPv6(address_string, address.sin6_addr)) {
+        std::cerr << "Invalid address" << std::endl;
+        close(peer_socket);
+        return -1;
+    }
+
+    address.sin6_family = AF_INET6;
+    address.sin6_port = htons(port);
+
+    if (connect(peer_socket, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == -1) {
+        std::cerr << "Couldn't connect to peer" << std::endl;
+        close(peer_socket);
+        return -1;
+    }
+    return peer_socket;
 }
