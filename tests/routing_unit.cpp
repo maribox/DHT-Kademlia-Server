@@ -37,6 +37,8 @@ bool compare_in6_addr(const in6_addr& a, const in6_addr& b) {
     return memcmp(&a, &b, sizeof(in6_addr)) == 0;
 }
 
+
+
 TEST_CASE("RoutingTable", "[routing]") {
     RoutingTable routing_table = RoutingTable(in6addr_loopback, 8080);
     REQUIRE(compare_in6_addr(routing_table.get_local_node().addr, in6addr_loopback));
@@ -87,6 +89,30 @@ TEST_CASE("RoutingTable", "[routing]") {
         auto second_end = std::array<unsigned char, KEYSIZE>{};
         second_end.fill(0xff);
         REQUIRE(buckets.at(1).get_end() == second_end);
+    }
+    SECTION("Routing Table find_closest_nodes") {
+        for (int i = 0; i < K + 1; i++) {
+            Node peer = {in6addr_loopback, static_cast<u_short> (ServerConfig::P2P_PORT + 2 + i), generateRandomNodeID()};
+            routing_table.add_peer(peer);
+        }
+        std::vector<Node> all_nodes;
+        for (auto& bucket : routing_table.get_bucket_list()) {
+            REQUIRE(!RoutingTable::has_duplicate_id(bucket.get_peers()));
+            all_nodes.insert(all_nodes.end(), bucket.get_peers().begin(), bucket.get_peers().end());
+        }
+
+        REQUIRE(!RoutingTable::has_duplicate_id(all_nodes));
+
+        NodeID target_node_id = generateRandomNodeID();
+        std::vector<Node> closest_nodes = routing_table.find_closest_nodes(target_node_id);
+        REQUIRE(!RoutingTable::has_duplicate_id(closest_nodes));
+        REQUIRE(closest_nodes.size() == K);
+        NodeID last_distance = RoutingTable::node_distance(closest_nodes.at(0).id, target_node_id);
+        for (int i = 1; i < closest_nodes.size(); i++) {
+            auto distance = RoutingTable::node_distance(closest_nodes.at(i).id, target_node_id);
+            REQUIRE(last_distance < distance);
+            last_distance = distance;
+        }
     }
 }
 

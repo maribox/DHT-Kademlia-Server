@@ -56,6 +56,62 @@ const std::list<Node>& K_Bucket::get_peers() const {
     return peers;
 }
 
+size_t RoutingTable::get_bucket_for(NodeID node_id) {
+    for (size_t bucket_i = 0; bucket_i < bucket_list.size(); bucket_i++) {
+        auto& bucket = bucket_list.at(bucket_i);
+        if (bucket.get_start() <= node_id && node_id <= bucket.get_end()) {
+            return bucket_i;
+        }
+    }
+    return -1;
+}
+
+NodeID RoutingTable::node_distance(const NodeID& node_1, const NodeID& node_2) {
+    NodeID distance;
+    for (int i = 0; i < KEYSIZE; ++i) {
+        distance[i] = (node_1[i] ^ node_2[i]);
+    }
+    return distance;
+}
+
+
+
+std::vector<Node> RoutingTable::find_closest_nodes(NodeID target_node_id) {
+    std::vector<Node> closest_nodes;
+    int bucket_index_left = get_bucket_for(target_node_id) - 1;
+    int bucket_index_right = bucket_index_left + 1;
+
+    int added_on_left = 0;
+    int added_on_right = 0;
+
+    while((added_on_left < K && bucket_index_left >= 0)) { // add up to K on the left
+        closest_nodes.insert(closest_nodes.end(),
+            bucket_list.at(bucket_index_left).get_peers().begin(),
+            bucket_list.at(bucket_index_left).get_peers().end());
+        added_on_left += bucket_list.at(bucket_index_left).get_peers().size();
+        bucket_index_left--;
+    }
+
+    while(added_on_right < K && bucket_index_right < bucket_list.size()) { // add up to K on the right
+        closest_nodes.insert(closest_nodes.end(),
+            bucket_list.at(bucket_index_right).get_peers().begin(),
+            bucket_list.at(bucket_index_right).get_peers().end());
+        added_on_right += bucket_list.at(bucket_index_right).get_peers().size();
+        bucket_index_right++;
+    }
+
+    closest_nodes.push_back(local_node);
+    std::sort(closest_nodes.begin(), closest_nodes.end(),
+        [this, target_node_id](const Node& node_1, const Node& node_2){return node_distance(node_1.id, target_node_id) < node_distance(node_2.id, target_node_id);}
+    );
+
+    if (closest_nodes.size() > K) {
+        closest_nodes.resize(K);
+    }
+
+    return closest_nodes;
+}
+
 RoutingTable::RoutingTable(const in6_addr& ip, const in_port_t& port,
                            const NodeID& id)
     : bucket_list(), local_node({ip, port, id}) {
@@ -103,7 +159,7 @@ void RoutingTable::split_bucket(K_Bucket bucket, int depth) {
     K_Bucket first(start_first, end_first);
     K_Bucket second(start_second, end_second);
 
-    for (auto peer : bucket.get_peers()) {
+    for (auto& peer : bucket.get_peers()) {
         if (peer.id <= first.get_end()) {
             first.add_peer(peer);
         } else {

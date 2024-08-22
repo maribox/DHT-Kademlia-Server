@@ -75,7 +75,8 @@ bool send_dht_failure(socket_t, key_type); // TODO
 
 int parse_commandline_args(int argc, const char* argv[]);
 
-socket_t setupSocket(u_short port);
+socket_t setupServerSocket(u_short port);
+socket_t setupConnectSocket(std::string address_string, u_short port);
 int setupEpoll(int epollfd, socket_t serversocket);
 
 
