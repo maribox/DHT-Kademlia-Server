@@ -9,7 +9,11 @@
 #include <sys/epoll.h>
 
 static constexpr size_t KEYSIZE  = 32;
+static constexpr size_t RPC_ID_SIZE  = KEYSIZE;
+static constexpr size_t NODE_ID_SIZE  = KEYSIZE;
 static constexpr size_t HEADERSIZE  = 4;
+static constexpr size_t NODESIZE  = 16 + 2 + 32; // using 16B for ipv6 instead of ipv4 as defined in midterm
+
 using key_type = std::array<unsigned char,KEYSIZE>;
 using value_type = std::vector<unsigned char>;
 using message_t = std::vector<unsigned char>;
@@ -40,11 +44,12 @@ enum class ConnectionType {
 struct ConnectionInfo{
         ConnectionType connectionType;
         key_type rpc_id;
-        std::vector<unsigned char> receivedBytes;
+        message_t receivedBytes;
         bool receivedBytesInUse;
-        std::vector<unsigned char> sendBytes; // TODO: This is a todo send buffer. See epoll case EPOLLOUT.
+        message_t sendBytes; // TODO: This is a todo send buffer. See epoll case EPOLLOUT.
         bool sendBytesInUse;
         socket_t relayTo{-1}; //Possibly relay the request to other server that sits closer (XOR) to the requested key.
+        socket_t replyTo{};
     };
 
 enum MODULE_API_TYPE {
@@ -83,30 +88,34 @@ int setupEpoll(int epollfd, socket_t serversocket);
 void runEventLoop(socket_t module_api_socket, socket_t p2p_socket, int epollfd,
                   std::vector<epoll_event>& epoll_events);
 
-void handleDHTRPCPing(const ConnectionInfo& connectInfo);
+bool handleDHTRPCPing(const ConnectionInfo& connectInfo);
 
-void handleDHTPUT(ConnectionInfo& connectInfo);
+bool handleDHTPUT(ConnectionInfo& connectInfo);
 
-void handleDHTGET(ConnectionInfo& connectInfo);
+bool handleDHTGET(ConnectionInfo& connectInfo);
 
-void handleDHTSUCCESS(ConnectionInfo& connectInfo);
+bool handleDHTSUCCESS(ConnectionInfo& connectInfo);
 
-void handleDHTFAILURE(ConnectionInfo& connectInfo);
+bool handleDHTFAILURE(ConnectionInfo& connectInfo);
 
-void handleDHTRPCStore(const ConnectionInfo& connectInfo);
+bool handleDHTRPCStore(const ConnectionInfo& connectInfo, u_short body_size);
 
-void handleDHTRPCFindNode(const ConnectionInfo& connectInfo);
+bool handleDHTRPCFindNode(const ConnectionInfo& connectInfo, u_short body_size);
 
-void handleDHTRPCFindValue(const ConnectionInfo& connectInfo);
+bool handleDHTRPCFindValue(const ConnectionInfo& connectInfo, u_short body_size);
 
-void handleDHTRPCPingReply(const ConnectionInfo& connectInfo);
+bool handleDHTRPCPingReply(const ConnectionInfo& connectInfo, u_short body_size);
 
-void handleDHTRPCStoreReply(const ConnectionInfo& connectInfo);
+bool handleDHTRPCStoreReply(const ConnectionInfo& connectInfo, u_short body_size);
 
-void handleDHTRPCFindNodeReply(const ConnectionInfo& connectInfo);
+bool handleDHTRPCFindNodeReply(const ConnectionInfo& connectInfo, u_short body_size);
 
-void handleDHTRPCFindValueReply(const ConnectionInfo& connectInfo);
+bool handleDHTRPCFindValueReply(const ConnectionInfo& connectInfo, u_short body_size);
 
-void handleDHTError(const ConnectionInfo& connectInfo);
+bool handleDHTError(const ConnectionInfo& connectInfo, u_short body_size);
 
 bool convertToIPv6(const std::string& address_string, struct in6_addr& address);
+
+void build_dht_header(size_t body_size, u_short message_type, message_t& message);
+
+bool send_dht_message(socket_t socket, message_t message);
