@@ -1,5 +1,5 @@
 #include "routing.h"
-#include "dht_server_wo_boost.h"
+#include "dht_server.h"
 
 #include <iostream>
 #include <netinet/in.h>
@@ -14,11 +14,11 @@ bool operator==(const Node& lhs, const Node& rhs) {
     return lhs.id == rhs.id;
 }
 
-K_Bucket::K_Bucket(const NodeID& start, const NodeID& end)
+KBucket::KBucket(const NodeID& start, const NodeID& end)
     : start(start), end(end), peers(), replacement_cache() {
 }
 
-bool K_Bucket::add_peer(const Node &peer) { // returns true if inserted or already in the list, else false
+bool KBucket::add_peer(const Node &peer) { // returns true if inserted or already in the list, else false
     // according to 2.2: "Each k-bucket is kept sorted by time last seen—least-recently seen node  at the head, most-recently seen at the tail."
     // therefore, try to find and then move to back
     auto it = std::find(peers.begin(), peers.end(), peer);
@@ -44,15 +44,15 @@ bool K_Bucket::add_peer(const Node &peer) { // returns true if inserted or alrea
     }
 }
 
-NodeID K_Bucket::get_start() const {
+NodeID KBucket::get_start() const {
     return this->start;
 }
 
-NodeID K_Bucket::get_end() const {
+NodeID KBucket::get_end() const {
     return this->end;
 }
 
-const std::list<Node>& K_Bucket::get_peers() const {
+const std::list<Node>& KBucket::get_peers() const {
     return peers;
 }
 
@@ -68,7 +68,7 @@ size_t RoutingTable::get_bucket_for(NodeID node_id) {
 
 NodeID RoutingTable::node_distance(const NodeID& node_1, const NodeID& node_2) {
     NodeID distance;
-    for (int i = 0; i < KEYSIZE; ++i) {
+    for (int i = 0; i < KEY_SIZE; ++i) {
         distance[i] = (node_1[i] ^ node_2[i]);
     }
     return distance;
@@ -119,14 +119,14 @@ RoutingTable::RoutingTable(const in6_addr& ip, const in_port_t& port,
     first_bucket_start.fill(0);
     NodeID first_bucket_end;
     first_bucket_end.fill(255);
-    bucket_list.push_back(K_Bucket(first_bucket_start, first_bucket_end));
+    bucket_list.push_back(KBucket(first_bucket_start, first_bucket_end));
 }
 
-int RoutingTable::get_shared_prefix_bits(K_Bucket bucket) {
+int RoutingTable::get_shared_prefix_bits(KBucket bucket) {
     // if bucket full and d !≡ 0 (mod 6), try to split
     // -> check length of prefix shared by all nodes in k-bucket's range
     int shared_prefix_bits = 0;
-    for (auto byte_no = 0; byte_no < KEYSIZE; byte_no++) {
+    for (auto byte_no = 0; byte_no < KEY_SIZE; byte_no++) {
         auto start_byte = bucket.get_start()[byte_no]; // e.g. 0011.0000
         auto end_byte = bucket.get_end()[byte_no]; // e.g. 0011.1111 -> depth would be 4
 
@@ -137,7 +137,7 @@ int RoutingTable::get_shared_prefix_bits(K_Bucket bucket) {
             if (start_bit == end_bit) {
                 shared_prefix_bits++;
             } else {
-                byte_no = KEYSIZE;
+                byte_no = KEY_SIZE;
                 break;
             }
         }
@@ -145,7 +145,7 @@ int RoutingTable::get_shared_prefix_bits(K_Bucket bucket) {
     return shared_prefix_bits;
 }
 
-void RoutingTable::split_bucket(K_Bucket bucket, int depth) {
+void RoutingTable::split_bucket(KBucket bucket, int depth) {
     // e.g. // e.g. 110|0|000 - // e.g. 110|1|111 -> depth == index of bit to switch, in this example 3
     auto start_first = bucket.get_start(); // e.g. 110|0|000
 
@@ -156,8 +156,8 @@ void RoutingTable::split_bucket(K_Bucket bucket, int depth) {
     auto start_second = bucket.get_start(); // e.g. 110|1|000 -> we flip byte_no bit of start
     start_second[byte_no] = start_second[byte_no] ^ (1 << bit_no);
     auto end_second = bucket.get_end(); // e.g. 110|1|111
-    K_Bucket first(start_first, end_first);
-    K_Bucket second(start_second, end_second);
+    KBucket first(start_first, end_first);
+    KBucket second(start_second, end_second);
 
     for (auto& peer : bucket.get_peers()) {
         if (peer.id <= first.get_end()) {
@@ -207,11 +207,11 @@ const Node& RoutingTable::get_local_node() const {
     return this->local_node;
 }
 
-const std::vector<K_Bucket>& RoutingTable::get_bucket_list() const {
+const std::vector<KBucket>& RoutingTable::get_bucket_list() const {
     return this->bucket_list;
 }
 
-NodeID generateRandomNodeID() {
+NodeID generate_random_nodeID() {
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(0, 255);
