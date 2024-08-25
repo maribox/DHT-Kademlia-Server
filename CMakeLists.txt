@@ -25,24 +25,25 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0") # Add -O0 flag for 
 
 find_package(Boost REQUIRED COMPONENTS program_options)
 
-add_executable(dht_server_wo_boost ${SOURCE_DIR}/dht_server_wo_boost.cpp ${SOURCE_DIR}/routing.cpp)
+add_executable(dht_server ${SOURCE_DIR}/dht_server.cpp ${SOURCE_DIR}/routing.cpp
+        src/common_types.h)
 add_executable(testing ${TEST_DIR}/storage_unit.cpp)
-add_executable(routing_tests ${TEST_DIR}/routing_unit.cpp ${SOURCE_DIR}/routing.cpp ${SOURCE_DIR}/dht_server_wo_boost.cpp)
+add_executable(routing_tests ${TEST_DIR}/routing_unit.cpp ${SOURCE_DIR}/routing.cpp ${SOURCE_DIR}/dht_server.cpp)
 
 # shouldn't be necessary, but somehow doesn't work when removed
 target_compile_definitions(routing_tests PRIVATE TESTING)
 
-target_include_directories(dht_server_wo_boost PRIVATE ${Boost_INCLUDE_DIRS})
+target_include_directories(dht_server PRIVATE ${Boost_INCLUDE_DIRS})
 
-target_compile_options(dht_server_wo_boost PRIVATE -g -no-pie)
-target_compile_definitions(dht_server_wo_boost PRIVATE BOOST_STACKTRACE_USE_ADDR2LINE)
+target_compile_options(dht_server PRIVATE -g -no-pie)
+target_compile_definitions(dht_server PRIVATE BOOST_STACKTRACE_USE_ADDR2LINE)
 target_compile_options(routing_tests PRIVATE -g)
 
-target_link_libraries(dht_server_wo_boost PRIVATE ${Boost_LIBRARIES})
+target_link_libraries(dht_server PRIVATE ${Boost_LIBRARIES})
 target_link_libraries(testing PRIVATE Catch2::Catch2WithMain ${Boost_LIBRARIES})
 target_link_libraries(routing_tests PRIVATE Catch2::Catch2WithMain ${Boost_LIBRARIES})
 
-target_link_options(dht_server_wo_boost PRIVATE -no-pie)
+target_link_options(dht_server PRIVATE -no-pie)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
