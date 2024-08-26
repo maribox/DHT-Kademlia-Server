@@ -674,6 +674,53 @@ void accept_new_connection(int epollfd, std::vector<epoll_event>::value_type cur
     connectionMap.insert_or_assign(socket, ConnectionInfo{connectionType});
 }
 
+
+
+void handle_EPOLLOUT(auto epollfd, socket_t notifying_socket){
+    ConnectionInfo connection_info = connectionMap.at(notifying_socket);
+    if(connection_info.sendBytes.size() == 0){
+        return;
+    }
+
+    if(connection_info.sentBytes < connection_info.sendBytes.size()){
+        //Not all bytes were sent in a previous attemt to write the full message to the socket
+
+        int written_bytes = write(notifying_socket,
+                                    &(connection_info.sendBytes.at(connection_info.sentBytes)),
+                                    connection_info.sendBytes.size() - connection_info.sentBytes);
+
+        if(written_bytes == -1 && errno == EWOULDBLOCK){
+            //Wait for new EPOLLOUT event. Buffer was full. This is considered a dead branch... Should not happen.
+            std::cout << "Reached a considered dead branch. in handle_EPOLLOUT(epollfd,notifying_socket)" << std::endl;
+            return;
+        } 
+        else if (written_bytes == -1){
+            //Faulty connection. Remove relayTos, then remove it.
+            std::cout << "Faulty connection detected while trying to send data. Closed it and all relayTo connections." << std::endl;
+            if(connection_info.relayTo != -1) {
+                auto relay_to_socket = connection_info.relayTo;
+                epoll_ctl(epollfd,EPOLL_CTL_DEL,relay_to_socket,nullptr);
+                close(relay_to_socket);
+            }
+            epoll_ctl(epollfd,EPOLL_CTL_DEL,notifying_socket,nullptr);
+            close(notifying_socket);
+            return;
+        }
+
+        assert(written_bytes > 0);
+
+        connection_info.sentBytes += written_bytes;
+        //TODO: Unset the relayto field as soon as all answers have arrived (referring to concurrent lookups) (receiving event)
+        
+        //TODO: Check if i am initiator, if yes, keep connection open (wait for receiving). Otherwise, close connection (I was waiting, so i have received what i waited for).
+    
+    } else{
+        //all bytes were sent. Nothing to do except for performing a hard-reset to default sent-fields.
+        connection_info.sendBytes.clear();
+        connection_info.sentBytes = 0;
+    }
+}
+
 void run_event_loop(socket_t module_api_socket, socket_t p2p_socket, int epollfd,
                   std::vector<epoll_event> &epoll_events) {
     std::cout << "Server running... " << std::endl;
@@ -729,9 +776,12 @@ void run_event_loop(socket_t module_api_socket, socket_t p2p_socket, int epollfd
                         std::cout << std::string_view(reinterpret_cast<const char *>(recv_buf.data()), bytesRead) << "\n";
                     }
                 }
-                if (curEvent.events & EPOLLOUT) {
-                    // partial output. Send rest of answer
-                }
+
+
+                if (curEvent.events & EPOLLOUT)
+                    handle_EPOLLOUT(epollfd,curEvent.data.fd);
+
+
                 if (curEvent.events & EPOLLERR) {
                     epoll_ctl(epollfd, EPOLL_CTL_DEL, curEvent.data.fd, nullptr);
                     connectionMap.erase(curEvent.data.fd);

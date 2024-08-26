@@ -49,8 +49,11 @@ struct ConnectionInfo{
         Key rpc_id;
         Message receivedBytes;
         bool receivedBytesInUse;
+        
         Message sendBytes; // TODO: This is a todo send buffer. See epoll case EPOLLOUT.
+        size_t sentBytes{0};
         bool sendBytesInUse;
+
         socket_t relayTo{-1}; //Possibly relay the request to other server that sits closer (XOR) to the requested key.
         socket_t replyTo{};
     };

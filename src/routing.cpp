@@ -56,6 +56,10 @@ const std::list<Node>& KBucket::get_peers() const {
     return peers;
 }
 
+const std::list<Node>& KBucket::get_replacement_cache() const{
+    return replacement_cache;
+}
+
 size_t RoutingTable::get_bucket_for(NodeID node_id) {
     for (size_t bucket_i = 0; bucket_i < bucket_list.size(); bucket_i++) {
         auto& bucket = bucket_list.at(bucket_i);
