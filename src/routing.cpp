@@ -146,6 +146,7 @@ int RoutingTable::get_shared_prefix_bits(KBucket bucket) {
 }
 
 void RoutingTable::split_bucket(KBucket bucket, int depth) {
+    // TODO: replacement cache
     // e.g. // e.g. 110|0|000 - // e.g. 110|1|111 -> depth == index of bit to switch, in this example 3
     auto start_first = bucket.get_start(); // e.g. 110|0|000
 
@@ -167,7 +168,15 @@ void RoutingTable::split_bucket(KBucket bucket, int depth) {
         }
     }
 
-    auto it = std::find(bucket_list.cbegin(), bucket_list.cend(), bucket);
+    for (auto& peer : bucket.get_replacement_cache()) {
+        if (peer.id <= first.get_end()) {
+            first.add_peer(peer);
+        } else {
+            second.add_peer(peer);
+        }
+    }
+
+    auto it = std::ranges::find(std::as_const(bucket_list), bucket);
     if (it == bucket_list.cend()) {
         std::cerr << "Provided a bucket not in the bucket list" << std::endl;
         return;
@@ -182,6 +191,7 @@ void RoutingTable::split_bucket(KBucket bucket, int depth) {
 
 //TODO: implement this. look at sections 2.2, 2.4, 4.2
 void RoutingTable::add_peer(const Node& peer) {
+    // TODO: replace with function
     for (auto& bucket : bucket_list) {
         if (bucket.get_start() <= peer.id  && peer.id <= bucket.get_end()) {
         // according to 2.4: "When u learns of a new contact, it  attempts to insert the contact in the appropriate k-bucket.

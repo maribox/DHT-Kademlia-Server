@@ -29,6 +29,7 @@ class KBucket {
     NodeID get_start() const;
     NodeID get_end() const;
     const std::list<Node>& get_peers() const;
+    const std::list<Node>& get_replacement_cache() const;
 };
 
 NodeID generate_random_nodeID();

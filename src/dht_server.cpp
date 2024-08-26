@@ -181,14 +181,6 @@ void write_body(Message& message, size_t body_offset, unsigned char* data, size_
 }
 
 void read_body(const Message& message, size_t body_offset, unsigned char* data, size_t data_size) {
-    // TODO: @joern how does this compare
-    // for (size_t i = 0; i < data_size; i++) {
-    // data[i] = message[HEADERSIZE + body_offset + i];
-    // //}
-    // std::copy_n(connectionBuffer.begin() + rpc_id_offset, KEYSIZE, std::begin(rpc_id));
-    // or
-    // std::copy(target_node_id.begin(), target_node_id.end(), connectionBuffer.begin() + node_id_offset);
-    // also for write_body?
     std::copy_n(message.data() + HEADER_SIZE + body_offset, data_size, data);
 }
 
@@ -403,8 +395,8 @@ bool send_DHT_RPC_find_node(socket_t socket, NodeID node_id) {
 
     build_DHT_header(body_size, message_type, message);
 
-    write_body(message, 0, rpc_id.data(), 32);
-    write_body(message, 32, node_id.data(), 32);
+    write_body(message, 0, rpc_id.data(), RPC_ID_SIZE);
+    write_body(message, RPC_ID_SIZE, node_id.data(), NODE_ID_SIZE);
 
     connectionMap.at(socket).rpc_id = rpc_id;
 
@@ -641,7 +633,7 @@ ProcessingStatus try_processing(socket_t curfd){
             std::cerr << "Tried to send invalid Request to Module API Server. Aborting." << std::endl;
             return ProcessingStatus::ERROR;
         }
-
+        // TODO: Pass socket instead of connection info
         request_successful = parse_API_request(connection_info, body_size, module_api_type);
     } else if (connection_info.connectionType == ConnectionType::P2P) {
         P2PType p2p_type;
