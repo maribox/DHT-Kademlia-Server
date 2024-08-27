@@ -623,7 +623,6 @@ bool handle_DHT_RPC_find_value_reply(const socket_t socket, const u_short body_s
     forge_DHT_success(socket, key, value);
 
     return true;
-
 }
 
 bool forge_DHT_error(socket_t socket, ErrorType error) {
@@ -853,6 +852,40 @@ void handle_EPOLLOUT(auto epollfd, socket_t notifying_socket){
         //all bytes were sent. Nothing to do except for performing a hard-reset to default sent-fields.
         connection_info.send_bytes.clear();
         connection_info.sent_bytes = 0;
+    }
+}
+
+void handle_EPOLLIN(auto epollfd, socket_t notifying_socket){
+    std::cout << "Received new request." << std::endl;
+    std::array<unsigned char, 4096> recv_buf{};
+    auto curfd = curEvent.data.fd;
+    if (!connection_map.contains(curfd)) {
+        connection_map.insert_or_assign(curfd, ConnectionInfo{});
+    }
+    auto &connection_buffer = connection_map.at(curfd).received_bytes;
+    while (true) {
+        // This loop is used in order to pull all bytes that
+        // reside already on this machine in the kernel socket buffer.
+        // once this exausts, we try processing.
+        auto bytesRead = read(curfd, recv_buf.data(), recv_buf.size());
+        if (bytesRead == 0
+            || (bytesRead == -1 && errno == EWOULDBLOCK)) {
+            bool processingStatus = try_processing(curfd);
+            std::cout << "Processing finished: " << processingStatus
+                    << std::endl;
+            if (processingStatus == true) {
+                // epoll_ctl(epollfd,EPOLL_CTL_DEL,curfd,nullptr);
+            }
+            break;
+        } else if (bytesRead == -1) { // TODO: rutscht immer hier rein in der 2. iteration dieses loops
+            epoll_ctl(epollfd, EPOLL_CTL_DEL, curfd, nullptr);
+            connection_map.erase(curfd);
+            break;
+        }
+        connection_buffer.insert(connection_buffer.end(), recv_buf.begin(),
+                                    recv_buf.begin() + bytesRead);
+
+        std::cout << std::string_view(reinterpret_cast<const char *>(recv_buf.data()), bytesRead) << "\n";
     }
 }
 
@@ -1110,48 +1143,13 @@ int main(int argc, char const *argv[])
                 accept_new_connection(epollfd, curEvent, ConnectionType::P2P);
             } else {
                 // handle client processing of existing seassions
-                if (curEvent.events & EPOLLIN) {
-                    std::cout << "Received new request." << std::endl;
-                    std::array<unsigned char, 4096> recv_buf{};
-                    auto curfd = curEvent.data.fd;
-                    if (!connection_map.contains(curfd)) {
-                        connection_map.insert_or_assign(curfd, ConnectionInfo{});
-                    }
-                    auto &connection_buffer = connection_map.at(curfd).received_bytes;
-                    while (true) {
-                        // This loop is used in order to pull all bytes that
-                        // reside already on this machine in the kernel socket buffer.
-                        // once this exausts, we try processing.
-                        auto bytesRead = read(curfd, recv_buf.data(), recv_buf.size());
-                        if (bytesRead == 0
-                            || (bytesRead == -1 && errno == EWOULDBLOCK)) {
-                            ProcessingStatus processing_status = try_processing(curfd);
-                            std::cout << "Processing finished: " << processing_status
-                                    << std::endl;
-                            if (processing_status == ProcessingStatus::ERROR) {
-                                std::cerr << "Had error with processing. Closing channel to e.g. unreachable peer." << std::endl;
-                                epoll_ctl(epollfd, EPOLL_CTL_DEL, curfd, nullptr);
-                                connection_map.erase(curfd);
-                            }
-                            break;
-                        } else if (bytesRead == -1) { // TODO: rutscht immer hier rein in der 2. iteration dieses loops
-                            std::cout << "Channel closed." << std::endl;
-                            epoll_ctl(epollfd, EPOLL_CTL_DEL, curfd, nullptr);
-                            connection_map.erase(curfd);
-                            break;
-                        }
-                        connection_buffer.insert(connection_buffer.end(), recv_buf.begin(),
-                                                 recv_buf.begin() + bytesRead);
-
-                        std::cout << std::string_view(reinterpret_cast<const char *>(recv_buf.data()), bytesRead) << "\n";
-                    }
-                }
-                if (connection_map.contains(curEvent.data.fd) && curEvent.events & EPOLLOUT)
+                if (curEvent.events & EPOLLIN)
+                    handle_EPOLLIN(epollfd,curEvent.data.fd);
+                if (curEvent.events & EPOLLOUT)
                     handle_EPOLLOUT(epollfd,curEvent.data.fd);
-                if (connection_map.contains(curEvent.data.fd) && curEvent.events & EPOLLERR) {
+                if (curEvent.events & EPOLLERR){
                     epoll_ctl(epollfd, EPOLL_CTL_DEL, curEvent.data.fd, nullptr);
                     connection_map.erase(curEvent.data.fd);
-                    continue;
                 }
             }
         }
