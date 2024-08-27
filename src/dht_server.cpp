@@ -30,7 +30,7 @@ https://www.boost.org/doc/libs/1_82_0/libs/log/doc/html/index.html
 */
 
 
-std::unordered_map<socket_t,ConnectionInfo> connectionMap;
+std::unordered_map<socket_t,ConnectionInfo> connection_map;
 static constexpr size_t MAXLIFETIMESEC = 20*60; // 20 minutes in seconds
 static constexpr size_t MINLIFETIMESEC = 3*60;  //  3 minutes in seconds
 static constexpr size_t DEFAULTLIFETIMESEC = 5*60; // 5 minutes in seconds
@@ -184,10 +184,10 @@ void read_body(const Message& message, size_t body_offset, unsigned char* data, 
     std::copy_n(message.data() + HEADER_SIZE + body_offset, data_size, data);
 }
 
-bool send_DHT_message(socket_t socket, Message message) {
+bool forge_DHT_message(socket_t socket, Message message) {
     auto sent = write(socket, message.data(), message.size());
-    // TODO: @joern how was the connectionMap send buffer supposed to work again?
-    if (sent != message.size()) {
+    // if write wasn't completed yet, rest will be sent with epoll wait
+    if (sent == -1) {
         std::cerr << "Error sending message, aborting." << std::endl;
         return false;
     }
@@ -196,19 +196,20 @@ bool send_DHT_message(socket_t socket, Message message) {
 
 // Module API functions handling+construction functions
 
-bool send_DHT_put(socket_t socket, Key &key, Value &value) {
+bool forge_DHT_put(socket_t socket, Key &key, Value &value) {
+    return true;
 }
 
 
-bool handle_DHT_put(ConnectionInfo &connection_info) {
-    const Value &connectionBuffer = connection_info.receivedBytes;
+bool handle_DHT_put(socket_t socket) {
+    const Value &connection_buffer = connection_map[socket].received_bytes;
     const size_t ttl_offset = HEADER_SIZE;
     const size_t key_offset = ttl_offset + 4;
     const size_t value_offset = key_offset + KEY_SIZE;
 
     // copy key into local var
     Key key;
-    std::copy_n(connectionBuffer.cbegin() + key_offset, KEY_SIZE, std::begin(key));
+    std::copy_n(connection_buffer.cbegin() + key_offset, KEY_SIZE, std::begin(key));
 
     if (not is_in_my_range(key)) {
         // todo: Relay!!
@@ -216,36 +217,38 @@ bool handle_DHT_put(ConnectionInfo &connection_info) {
         // 5. Forge answer to original peer (DHT_SUCCESS/DHT_FAILURE)
     }
 
-    u_short time_to_live = connectionBuffer[ttl_offset + 1];
+    u_short time_to_live = connection_buffer[ttl_offset + 1];
     time_to_live <<= 8;
-    time_to_live += connectionBuffer[ttl_offset];
+    time_to_live += connection_buffer[ttl_offset];
     if (time_to_live > MAXLIFETIMESEC || time_to_live < MINLIFETIMESEC) {
         // default time to live, as value is out of lifetime bounds
         time_to_live = DEFAULTLIFETIMESEC;
     }
 
-    unsigned char replication = connectionBuffer[ttl_offset + 2];
-    unsigned char reserved = connectionBuffer[ttl_offset + 3];
+    unsigned char replication = connection_buffer[ttl_offset + 2];
+    unsigned char reserved = connection_buffer[ttl_offset + 3];
 
     // copy value into local var
-    size_t value_size = connectionBuffer.size() - value_offset;
+    size_t value_size = connection_buffer.size() - value_offset;
     Value value;
     value.reserve(value_size);
-    std::copy_n(connectionBuffer.cbegin() + value_offset, value_size, std::begin(value));
+    std::copy_n(connection_buffer.cbegin() + value_offset, value_size, std::begin(value));
 
     save_to_storage(key, std::chrono::seconds(time_to_live), value);
+    return true;
 }
 
-bool send_DHT_get(socket_t socket, Key &key) {
+bool forge_DHT_get(socket_t socket, Key &key) {
+    return true;
 }
 
-bool handle_DHT_get(ConnectionInfo &connection_info) {
-    const Value &connectionBuffer = connection_info.receivedBytes;
+bool handle_DHT_get(socket_t socket) {
+    const Value &connection_buffer = connection_map[socket].received_bytes;
     const size_t key_offset = HEADER_SIZE;
 
     // copy key into local var
     std::array<unsigned char, KEY_SIZE> key;
-    std::copy_n(connectionBuffer.cbegin() + key_offset, KEY_SIZE, std::begin(key));
+    std::copy_n(connection_buffer.cbegin() + key_offset, KEY_SIZE, std::begin(key));
 
     if (not is_in_my_range(key)) {
         // todo: Relay!!
@@ -256,35 +259,29 @@ bool handle_DHT_get(ConnectionInfo &connection_info) {
     auto optVal = get_from_storage(key);
     if (optVal.has_value()) {
         // local storage hit, forge answer to requesting party:
-        //send_DHT_success(connection_info, optVal.value());
+        //forge_DHT_success(connection_info, optVal.value());
         // TODO: Queue send event in epoll, readied if EPOLLOUT
     } else {
         // local storage hit, forge answer to requesting party:
-        //send_DHT_failure(connection_info, optVal.value());
+        //forge_DHT_failure(connection_info, optVal.value());
         // TODO: Queue send event in epoll, readied if EPOLLOUT
     }
-}
-
-bool send_DHT_success(socket_t socket, Key &key, Value &value) {
-}
-
-bool send_DHT_success(socket_t socket, Key key, Value value); // TODO
-
-bool forge_DHT_success(ConnectionInfo &connection_info, const Value &value){
-    //TODO
-    //Save buffer into connection_info
     return true;
-};
+}
 
-bool handle_DHT_success(ConnectionInfo &connection_info) {
-    const Value &connectionBuffer = connection_info.receivedBytes;
+bool forge_DHT_success(socket_t socket, Key &key, Value &value) {
+    return true;
+}
+
+bool handle_DHT_success(socket_t socket) {
+    const Value &connection_buffer = connection_map[socket].received_bytes;
     // Currently received a frame for a relayed connection. Now, serve as relaying middlepoint and forward
     // message to correct peer (Client/Server, indistinguishable)
     const size_t key_offset = HEADER_SIZE;
     const size_t value_offset = key_offset + KEY_SIZE;
     // copy key into local var
     std::array<unsigned char, KEY_SIZE> key;
-    std::copy_n(connectionBuffer.begin() + key_offset, KEY_SIZE, std::begin(key));
+    std::copy_n(connection_buffer.begin() + key_offset, KEY_SIZE, std::begin(key));
 
     if (!is_in_my_range(key)) {
         // todo: Relay!!
@@ -297,24 +294,20 @@ bool handle_DHT_success(ConnectionInfo &connection_info) {
     //--> Forward unmodified dht_success message
     // We do not expect any confirmation.
     // close connection
-}
-
-bool send_DHT_failure(socket_t socket, Key &key) {
-}
-
-bool forge_DHT_failure(ConnectionInfo &connection_info, const Value &value){
-    //TODO
-    //Save buffer into connection_info
     return true;
-};
+}
 
-bool handle_DHT_failure(ConnectionInfo &connection_info) {
-    const Value &connectionBuffer = connection_info.receivedBytes;
+bool forge_DHT_failure(socket_t socket, Key &key) {
+    return true;
+}
+
+bool handle_DHT_failure(socket_t socket) {
+    const Value &connection_buffer = connection_map[socket].received_bytes;
     // copy key into dataframe
     const size_t key_offset = HEADER_SIZE;
     // copy key into local var
     std::array<unsigned char, KEY_SIZE> key;
-    std::copy_n(connectionBuffer.begin() + key_offset, KEY_SIZE, std::begin(key));
+    std::copy_n(connection_buffer.begin() + key_offset, KEY_SIZE, std::begin(key));
 
     if (!is_in_my_range(key)) {
         // todo: Relay!!
@@ -327,12 +320,13 @@ bool handle_DHT_failure(ConnectionInfo &connection_info) {
     //--> Forward unmodified dht_failure message with k-bucket table and DO NOT await answer.
     // We do not expect any confirmation.
     // close connection
+    return true;
 }
 
 
 // P2P/RPC handling+construction functions
 
-bool send_DHT_RPC_ping(socket_t socket) {
+bool forge_DHT_RPC_ping(socket_t socket) {
     // TODO: assumes connectionMap contains socket
     Key rpc_id = generate_random_nodeID();
 
@@ -345,30 +339,34 @@ bool send_DHT_RPC_ping(socket_t socket) {
 
     write_body(message, 0, rpc_id.data(), 32);
 
-    connectionMap.at(socket).rpc_id = rpc_id;
+    connection_map.at(socket).rpc_id = rpc_id;
 
-    return send_DHT_message(socket, message);
+    return forge_DHT_message(socket, message);
 }
 
-bool handle_DHT_RPC_ping(const ConnectionInfo& connection_info, const u_short body_size) {
-    const Value &connectionBuffer = connection_info.receivedBytes;
+bool handle_DHT_RPC_ping(const socket_t socket, const u_short body_size) {
+    const Value &connection_buffer = connection_map[socket].received_bytes;
     const size_t rpc_id_offset = HEADER_SIZE;
 
     // forgeDHTPingReply(connection_info, rpc_id);
+    return true;
 }
 
-bool send_DHT_RPC_ping_reply(socket_t socket) {
+bool forge_DHT_RPC_ping_reply(socket_t socket) {
+    return true;
 }
 
 // TODO: following functions even necessary? Should answers be waited upon in the respective switch-cases?
-bool handle_DHT_RPC_ping_reply(const ConnectionInfo& connection_info, const u_short body_size) {
+bool handle_DHT_RPC_ping_reply(const socket_t socket, const u_short body_size) {
+    return true;
 }
 
-bool send_DHT_RPC_store(socket_t socket, Key &key, Value &value) {
+bool forge_DHT_RPC_store(socket_t socket, Key &key, Value &value) {
+    return true;
 }
 
-bool handle_DHT_RPC_store(const ConnectionInfo& connection_info, const u_short body_size) {
-    const Value &connectionBuffer = connection_info.receivedBytes;
+bool handle_DHT_RPC_store(const socket_t socket, const u_short body_size) {
+    const Value &connection_buffer = connection_map[socket].received_bytes;
     const size_t rpc_id_offset = HEADER_SIZE;
     const size_t ttl_offset = rpc_id_offset + 32;
     const size_t key_offset = ttl_offset + 2;
@@ -377,15 +375,18 @@ bool handle_DHT_RPC_store(const ConnectionInfo& connection_info, const u_short b
     // TODO: look at DHT_STORE, also decide on difference of functionalities
 
     // forgeDHTStoreReply(connection_info, rpc_id, key, value);
+    return true;
 }
 
-bool send_DHT_RPC_store_reply(socket_t socket, Key &key, Value &value) {
+bool forge_DHT_RPC_store_reply(socket_t socket, Key &key, Value &value) {
+    return true;
 }
 
-bool handle_DHT_RPC_store_reply(const ConnectionInfo& connection_info, const u_short body_size) {
+bool handle_DHT_RPC_store_reply(const socket_t socket, const u_short body_size) {
+    return true;
 }
 
-bool send_DHT_RPC_find_node(socket_t socket, NodeID node_id) {
+bool forge_DHT_RPC_find_node(socket_t socket, NodeID node_id) {
     Key rpc_id = generate_random_nodeID();
 
     size_t body_size = 32 + 32;
@@ -398,20 +399,16 @@ bool send_DHT_RPC_find_node(socket_t socket, NodeID node_id) {
     write_body(message, 0, rpc_id.data(), RPC_ID_SIZE);
     write_body(message, RPC_ID_SIZE, node_id.data(), NODE_ID_SIZE);
 
-    connectionMap.at(socket).rpc_id = rpc_id;
+    connection_map.at(socket).rpc_id = rpc_id;
 
-    return send_DHT_message(socket, message);
+    return forge_DHT_message(socket, message);
 }
 
-bool forge_DHT_find_node_reply(socket_t socket, const Key & key, const std::vector<Node> & nodes) {
-    return true;
-}
-
-bool handle_DHT_RPC_find_node(const ConnectionInfo& connection_info, const u_short body_size) {
+bool handle_DHT_RPC_find_node(const socket_t socket, const u_short body_size) {
     if (body_size != 64) {
         return false;
     }
-    const Message& message = connection_info.receivedBytes;
+    const Message& message = connection_map[socket].received_bytes;
 
     Key rpc_id;
     read_body(message, 0, rpc_id.data(), RPC_ID_SIZE);
@@ -420,10 +417,10 @@ bool handle_DHT_RPC_find_node(const ConnectionInfo& connection_info, const u_sho
 
     // find closest nodes, then return them:
     auto closest_nodes = routing_table.find_closest_nodes(target_node_id);
-    return forge_DHT_find_node_reply(connection_info.replyTo, rpc_id, closest_nodes);
+    return forge_DHT_RPC_find_node_reply(socket, rpc_id, closest_nodes);
 }
 
-bool send_DHT_RPC_find_node_reply(socket_t socket, Key rpc_id,  std::vector<Node> closest_nodes) {
+bool forge_DHT_RPC_find_node_reply(socket_t socket, Key rpc_id,  std::vector<Node> closest_nodes) {
     // TODO: ipv6 or ipv4?
     size_t body_size = 32 + closest_nodes.size() * NODE_SIZE;
     size_t message_size = HEADER_SIZE + body_size;
@@ -437,22 +434,21 @@ bool send_DHT_RPC_find_node_reply(socket_t socket, Key rpc_id,  std::vector<Node
     for (size_t i = 0; i < closest_nodes.size(); i++) {
         auto& node = closest_nodes.at(i);
         write_body(message, RPC_ID_SIZE + i*NODE_SIZE, node.addr.s6_addr, 16);
-        // TODO: @joern Problem of endianness to reinterpret_cast here? Should we save in network byte order?
         u_short port_network_order = htons(node.port);
         write_body(message, RPC_ID_SIZE + i*NODE_SIZE + 16, reinterpret_cast<unsigned char*>(&port_network_order), 2);
         write_body(message, RPC_ID_SIZE + i*NODE_SIZE + 16 + 2, node.id.data(), 32);
     }
 
-    return send_DHT_message(socket, message);
+    return forge_DHT_message(socket, message);
 }
 
-bool handle_DHT_RPC_find_node_reply(const ConnectionInfo& connection_info, const u_short body_size) {
+bool handle_DHT_RPC_find_node_reply(const socket_t socket, const u_short body_size) {
     if ((body_size - 32) % NODE_SIZE != 0) {
         return false;
     }
     int num_nodes = (body_size - 32) / NODE_SIZE;
     std::vector<Node> closest_nodes{};
-    const Message& message = connection_info.receivedBytes;
+    const Message& message = connection_map[socket].received_bytes;
 
     Key rpc_id;
     read_body(message, 0, rpc_id.data(), 32);
@@ -470,16 +466,17 @@ bool handle_DHT_RPC_find_node_reply(const ConnectionInfo& connection_info, const
     return true;
 }
 
-bool send_DHT_RPC_find_value(socket_t socket, Key &key, Value &value) {
+bool forge_DHT_RPC_find_value(socket_t socket, Key &key, Value &value) {
+    return true;
 }
 
-bool handle_DHT_RPC_find_value(const ConnectionInfo& connection_info, const u_short body_size) {
-    const Value &connectionBuffer = connection_info.receivedBytes;
+bool handle_DHT_RPC_find_value(const socket_t socket, const u_short body_size) {
+    const Value &connection_buffer = connection_map[socket].received_bytes;
     const size_t rpc_id_offset = HEADER_SIZE;
     const size_t key_offset = rpc_id_offset + 32;
 
     Key key;
-    std::copy_n(connectionBuffer.begin() + key_offset, KEY_SIZE, std::begin(key));
+    std::copy_n(connection_buffer.begin() + key_offset, KEY_SIZE, std::begin(key));
 
 
 
@@ -490,40 +487,47 @@ bool handle_DHT_RPC_find_value(const ConnectionInfo& connection_info, const u_sh
         // auto closest_nodes = find_closest_nodes(key);
         // forgeDHTFindNodeReply(connection_info, rpc_id, closest_nodes);
     }
+    return true;
 }
 
-bool send_DHT_RPC_find_value_reply(socket_t socket, Key &key, Value &value) {
+bool forge_DHT_RPC_find_value_reply(socket_t socket, Key &key, Value &value) {
+    return true;
 }
 
-bool handle_DHT_RPC_find_value_reply(const ConnectionInfo& connection_info, const u_short body_size) {
+bool handle_DHT_RPC_find_value_reply(const socket_t socket, const u_short body_size) {
+    return true;
 }
 
-// send
+bool forge_DHT_error(socket_t socket, ErrorType error) {
+    return true;
+}
 
-bool handle_DHT_error(const ConnectionInfo& connection_info, const u_short body_size) {
+
+bool handle_DHT_error(const socket_t socket, const u_short body_size) {
     const size_t error_type_offset = HEADER_SIZE;
     // TODO: extract error type, switch case based on that
+    return true;
 }
 
 // Message Parsing
 
 bool parse_header(const ConnectionInfo &connection_info, u_short &message_size, u_short &dht_type){
-    const Message &connectionBuffer = connection_info.receivedBytes;
+    const Message &connection_buffer = connection_info.received_bytes;
     message_size = 0;
     dht_type = 0;
 
-    message_size += connectionBuffer[0];
+    message_size += connection_buffer[0];
     message_size <<= 8;
-    message_size += connectionBuffer[1];
+    message_size += connection_buffer[1];
     /*The message is expected to not even contain a key.
     All messages that adhere to protocol require a key sent.*/
     if(message_size < KEY_SIZE){
         return false;
     }
 
-    dht_type += connectionBuffer[2];
+    dht_type += connection_buffer[2];
     dht_type <<= 8;
-    dht_type += connectionBuffer[3];
+    dht_type += connection_buffer[3];
     /*The dht_type that was transmitted is not in the range of expected types*/
     if(!is_valid_DHT_type(dht_type)){
         return false;
@@ -533,29 +537,28 @@ bool parse_header(const ConnectionInfo &connection_info, u_short &message_size, 
 
 
 
-bool parse_API_request(ConnectionInfo &connection_info, const u_short body_size, const ModuleApiType module_api_type){
-    Value &connectionBuffer = connection_info.receivedBytes;
+bool parse_API_request(socket_t socket, const u_short body_size, const ModuleApiType module_api_type){
     switch (module_api_type){
         {
         case DHT_PUT:
             {
-            handle_DHT_put(connection_info);
+            handle_DHT_put(socket);
         break;
             }
         case DHT_GET:
             {
-            handle_DHT_get(connection_info);
+            handle_DHT_get(socket);
         break;
             }
         case DHT_SUCCESS:
             {
-            handle_DHT_success(connection_info);
+            handle_DHT_success(socket);
         break;
             // Close connection (was only for relaying!)
             }
         case DHT_FAILURE:
             {
-            handle_DHT_failure(connection_info);
+            handle_DHT_failure(socket);
         break;
             }
 
@@ -566,14 +569,14 @@ bool parse_API_request(ConnectionInfo &connection_info, const u_short body_size,
     return true;
 }
 
-bool parse_P2P_request(ConnectionInfo& connection_info, const u_short body_size, const P2PType p2p_type) {
+bool parse_P2P_request(socket_t socket, const u_short body_size, const P2PType p2p_type) {
     switch (p2p_type) {
         case DHT_RPC_PING:
             break;
         case DHT_RPC_STORE:
             break;
         case DHT_RPC_FIND_NODE:
-            return handle_DHT_RPC_find_node(connection_info, body_size);
+            return handle_DHT_RPC_find_node(socket, body_size);
             break;
         case DHT_RPC_FIND_VALUE:
             break;
@@ -582,7 +585,7 @@ bool parse_P2P_request(ConnectionInfo& connection_info, const u_short body_size,
         case DHT_RPC_STORE_REPLY:
             break;
         case DHT_RPC_FIND_NODE_REPLY:
-            return handle_DHT_RPC_find_node_reply(connection_info, body_size);
+            return handle_DHT_RPC_find_node_reply(socket, body_size);
             break;
         case DHT_RPC_FIND_VALUE_REPLY:
             break;
@@ -596,15 +599,15 @@ bool parse_P2P_request(ConnectionInfo& connection_info, const u_short body_size,
 
 ProcessingStatus try_processing(socket_t curfd){
     //retreive information for element to process:
-    ConnectionInfo &connection_info = connectionMap.at(curfd);
-    auto &connectionBuffer = connection_info.receivedBytes;
-    size_t byteCountToProcess = connectionBuffer.size();
-    if(connectionBuffer.size() == 0){
+    ConnectionInfo &connection_info = connection_map.at(curfd);
+    auto &connection_buffer = connection_info.received_bytes;
+    size_t byteCountToProcess = connection_buffer.size();
+    if(connection_buffer.size() == 0){
         /* i.e.: we got work to process (epoll event happened), the message buffer
         is empty, but all bytes of the kernel buffer were exhausted (server side).*/
         return ProcessingStatus::ERROR;
     }
-    if(connectionBuffer.size() < HEADER_SIZE){
+    if(connection_buffer.size() < HEADER_SIZE){
         return ProcessingStatus::WAIT_FOR_COMPLETE_MESSAGE_HEADER;
     }
 
@@ -625,7 +628,7 @@ ProcessingStatus try_processing(socket_t curfd){
 
     bool request_successful = false;
 
-    if (connection_info.connectionType == ConnectionType::MODULE_API) {
+    if (connection_info.connection_type == ConnectionType::MODULE_API) {
         ModuleApiType module_api_type;
         if (is_valid_module_API_type(dht_type)) {
             module_api_type = static_cast<ModuleApiType>(dht_type);
@@ -634,8 +637,8 @@ ProcessingStatus try_processing(socket_t curfd){
             return ProcessingStatus::ERROR;
         }
         // TODO: Pass socket instead of connection info
-        request_successful = parse_API_request(connection_info, body_size, module_api_type);
-    } else if (connection_info.connectionType == ConnectionType::P2P) {
+        request_successful = parse_API_request(curfd, body_size, module_api_type);
+    } else if (connection_info.connection_type == ConnectionType::P2P) {
         P2PType p2p_type;
         if (is_valid_P2P_type(dht_type)) {
             p2p_type = static_cast<P2PType>(dht_type);
@@ -643,9 +646,7 @@ ProcessingStatus try_processing(socket_t curfd){
             std::cerr << "Tried to send invalid Request to P2P Server. Aborting." << std::endl;
             return ProcessingStatus::ERROR;
         }
-        // TODO: Maybe temporary? How should we reply @joern
-        connection_info.replyTo = curfd;
-        request_successful = parse_P2P_request(connection_info, body_size, p2p_type);
+        request_successful = parse_P2P_request(curfd, body_size, p2p_type);
     } else {
         std::cerr << "No ConnectionType registered for client. Aborting." << std::endl;
         return ProcessingStatus::ERROR;
@@ -659,9 +660,9 @@ ProcessingStatus try_processing(socket_t curfd){
 }
 
 
-void accept_new_connection(int epollfd, std::vector<epoll_event>::value_type curEvent, ConnectionType connectionType) {
+void accept_new_connection(int epollfd, std::vector<epoll_event>::value_type cur_event, ConnectionType connection_type) {
     // accept new client connections from serverside
-    socket_t socket = accept4(curEvent.data.fd, nullptr, nullptr, SOCK_NONBLOCK);
+    socket_t socket = accept4(cur_event.data.fd, nullptr, nullptr, SOCK_NONBLOCK);
     if (!socket) {
         // Accept-Error
         return;
@@ -671,23 +672,23 @@ void accept_new_connection(int epollfd, std::vector<epoll_event>::value_type cur
     epollEvent.data.fd = socket;
     // TODO: epollEvent out of scope? add to vector
     epoll_ctl(epollfd, EPOLL_CTL_ADD, socket, &epollEvent);
-    connectionMap.insert_or_assign(socket, ConnectionInfo{connectionType});
+    connection_map.insert_or_assign(socket, ConnectionInfo{connection_type});
 }
 
 
 
 void handle_EPOLLOUT(auto epollfd, socket_t notifying_socket){
-    ConnectionInfo connection_info = connectionMap.at(notifying_socket);
-    if(connection_info.sendBytes.size() == 0){
+    ConnectionInfo connection_info = connection_map.at(notifying_socket);
+    if(connection_info.send_bytes.size() == 0){
         return;
     }
 
-    if(connection_info.sentBytes < connection_info.sendBytes.size()){
+    if(connection_info.sent_bytes < connection_info.send_bytes.size()){
         //Not all bytes were sent in a previous attemt to write the full message to the socket
 
         int written_bytes = write(notifying_socket,
-                                    &(connection_info.sendBytes.at(connection_info.sentBytes)),
-                                    connection_info.sendBytes.size() - connection_info.sentBytes);
+                                    &(connection_info.send_bytes.at(connection_info.sent_bytes)),
+                                    connection_info.send_bytes.size() - connection_info.sent_bytes);
 
         if(written_bytes == -1 && errno == EWOULDBLOCK){
             //Wait for new EPOLLOUT event. Buffer was full. This is considered a dead branch... Should not happen.
@@ -697,8 +698,8 @@ void handle_EPOLLOUT(auto epollfd, socket_t notifying_socket){
         else if (written_bytes == -1){
             //Faulty connection. Remove relayTos, then remove it.
             std::cout << "Faulty connection detected while trying to send data. Closed it and all relayTo connections." << std::endl;
-            if(connection_info.relayTo != -1) {
-                auto relay_to_socket = connection_info.relayTo;
+            if(connection_info.relay_to != -1) {
+                auto relay_to_socket = connection_info.relay_to;
                 epoll_ctl(epollfd,EPOLL_CTL_DEL,relay_to_socket,nullptr);
                 close(relay_to_socket);
             }
@@ -709,94 +710,22 @@ void handle_EPOLLOUT(auto epollfd, socket_t notifying_socket){
 
         assert(written_bytes > 0);
 
-        connection_info.sentBytes += written_bytes;
+        connection_info.sent_bytes += written_bytes;
         //TODO: Unset the relayto field as soon as all answers have arrived (referring to concurrent lookups) (receiving event)
         
         //TODO: Check if i am initiator, if yes, keep connection open (wait for receiving). Otherwise, close connection (I was waiting, so i have received what i waited for).
     
     } else{
         //all bytes were sent. Nothing to do except for performing a hard-reset to default sent-fields.
-        connection_info.sendBytes.clear();
-        connection_info.sentBytes = 0;
+        connection_info.send_bytes.clear();
+        connection_info.sent_bytes = 0;
     }
 }
 
-void run_event_loop(socket_t module_api_socket, socket_t p2p_socket, int epollfd,
-                  std::vector<epoll_event> &epoll_events) {
-    std::cout << "Server running... " << std::endl;
-    bool serverIsRunning = true;
-    while (serverIsRunning) {
-        int eventCount = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), -1);  // dangerous cast
-        // TODO: ADD SERVER MAINTAINENCE. purge storage (ttl), peer-ttl (k-bucket
-        // maintainence) internal management clean up local_storage for all keys,
-        // std::erase if ttl is outdated
-
-        if (eventCount == -1) {
-            serverIsRunning = false;
-            break;
-        }
-        for (int i = 0; i < eventCount; ++i) {
-            auto curEvent = epoll_events[i];
-            if (curEvent.data.fd == module_api_socket) {
-                accept_new_connection(epollfd, curEvent, ConnectionType::MODULE_API);
-            } else if (curEvent.data.fd == p2p_socket) {
-                accept_new_connection(epollfd, curEvent, ConnectionType::P2P);
-            } else {
-                // handle client processing of existing seassions
-                if (curEvent.events & EPOLLIN) {
-                    std::cout << "Received new request." << std::endl;
-                    std::array<unsigned char, 4096> recv_buf{};
-                    auto curfd = curEvent.data.fd;
-                    if (!connectionMap.contains(curfd)) {
-                        connectionMap.insert_or_assign(curfd, ConnectionInfo{});
-                    }
-                    auto &connectionBuffer = connectionMap.at(curfd).receivedBytes;
-                    while (true) {
-                        // This loop is used in order to pull all bytes that
-                        // reside already on this machine in the kernel socket buffer.
-                        // once this exausts, we try processing.
-                        auto bytesRead = read(curfd, recv_buf.data(), recv_buf.size());
-                        if (bytesRead == 0
-                            || (bytesRead == -1 && errno == EWOULDBLOCK)) {
-                            bool processingStatus = try_processing(curfd);
-                            std::cout << "Processing finished: " << processingStatus
-                                      << std::endl;
-                            if (processingStatus == true) {
-                                // epoll_ctl(epollfd,EPOLL_CTL_DEL,curfd,nullptr);
-                            }
-                            break;
-                        } else if (bytesRead == -1) { // TODO: rutscht immer hier rein in der 2. iteration dieses loops
-                            epoll_ctl(epollfd, EPOLL_CTL_DEL, curfd, nullptr);
-                            connectionMap.erase(curfd);
-                            break;
-                        }
-                        connectionBuffer.insert(connectionBuffer.end(), recv_buf.begin(),
-                                                recv_buf.begin() + bytesRead);
-
-                        std::cout << std::string_view(reinterpret_cast<const char *>(recv_buf.data()), bytesRead) << "\n";
-                    }
-                }
-
-
-                if (curEvent.events & EPOLLOUT)
-                    handle_EPOLLOUT(epollfd,curEvent.data.fd);
-
-
-                if (curEvent.events & EPOLLERR) {
-                    epoll_ctl(epollfd, EPOLL_CTL_DEL, curEvent.data.fd, nullptr);
-                    connectionMap.erase(curEvent.data.fd);
-                    continue;
-                }
-            }
-        }
-    }
-}
 
 // Network/Socket functions
 
 int setup_epoll(int epollfd, socket_t serversocket) {
-    // TODO SSL
-
     auto epollEvent = epoll_event{};
     epollEvent.events = EPOLLIN;
     epollEvent.data.fd = serversocket;
@@ -815,8 +744,9 @@ socket_t setup_server_socket(u_short port) {
     sock_addr.sin6_family = AF_INET6;
     sock_addr.sin6_port = htons(port);
     sock_addr.sin6_addr = in6addr_any;
-    bind(serversocket, reinterpret_cast<sockaddr *>(&sock_addr),
-         sizeof(sock_addr));  // TODO Error-checking
+    if (bind(serversocket, reinterpret_cast<sockaddr *>(&sock_addr),sizeof(sock_addr)) != 0) {
+        std::cerr << "Failed to bind port " << port << ". Try to pass a different port." << std::endl;
+    }
     listen(serversocket, 128);
     return serversocket;
 }
@@ -824,7 +754,7 @@ socket_t setup_server_socket(u_short port) {
 socket_t setup_connect_socket(std::string address_string, u_short port) {
     socket_t peer_socket = socket(AF_INET6, SOCK_STREAM, 0);
     if (peer_socket == -1) {
-        std::cerr << "Failed to create client socket" << std::endl;
+        std::cerr << "Failed to create client socket on port " << port << "." << std::endl;
         return -1;
     }
 
@@ -850,39 +780,60 @@ socket_t setup_connect_socket(std::string address_string, u_short port) {
 #ifndef TESTING1
 int main(int argc, char const *argv[])
 {
-    // TODO No. 1: restructure + refactor everything to be clear what uses p2p port and what module api port
-    // Own address
-    u_short host_port = ServerConfig::P2P_PORT;
+    /* Ports/Arguments:
+     * 1. host ip (if using ipv4, currently only compatible with network local IP address to not have a problem with NAT, e.g. 192.168.0.x)
+     * 2. host port for module API server
+     * 2. host port for p2p server
+     * 3. to join existing network: pass peer ip and port for p2p contact point
+    */
+
+
     std::string host_address_string = {};
     struct in6_addr host_address{};
+    u_short host_module_port = ServerConfig::MODULE_API_PORT;
+    u_short host_p2p_port = ServerConfig::P2P_PORT;
 
     // Peer to connect to as first contact
     u_short peer_port = 0;
     std::string peer_address_string = {};
     struct in6_addr peer_address{};
+
     bool connect_to_existing_network = true;
+
+    std::string help_description = "Run a DHT peer with local storage.\n\n"
+                "Multiple API clients can connect to this same instance.\n"
+                "To connect to an existing network, provide the ip address and port of a peer, otherwise a new network will be created.";
+    std::string options_description = "dht_server [-h|--help] | [-a|--host-address <host-address>] [-m|--module-port <module-port>] "
+                "[-p|--p2p-port <p2p-port>] [[-A|--peer-address <peer-address>] [-P|--peer-port <peer-port>]]\n\n"
+                "Example usages:\n"
+                "Start new p2p network on 192.168.0.42:7402\n"
+                "\tdht_server -a 192.168.0.42 -m 7401 -p 7402\n"
+                "Connect to p2p network on 192.168.0.42:7402 from 192.168.0.69:7404, accepting requests on port 7403\n"
+                "\tdht_server -a 192.168.0.69 -m 7403 -p 7404 -A 192.168.0.42 -P 7402\n";
 
     try
     {
         // Argument parsing:
         // Use boost::program_options for parsing:
-        progOpt::options_description desc{"Run a DHT module mockup with local storage.\n\nMultiple API clients can connect to this same instance.\nTo connect to an existing network, provide the ip address and port of a peer, otherwise new network will be created."};
+        progOpt::options_description desc{help_description + options_description};
         desc.add_options()("help,h", "Help screen")
-        ("address,a", progOpt::value<std::string>(&host_address_string), "Bind server to this address")
-        ("port,p", progOpt::value<u_short>(&host_port), "Bind server to this port")
-        ("peer-address,A", progOpt::value<std::string>(&peer_address_string), "Try to connect to existing network at this address")
-        ("peer-port,P", progOpt::value<u_short>(&peer_port), "Try to connect to existing network at this port")
+        ("host-address,a", progOpt::value<std::string>(&host_address_string), "Bind server to this address")
+        ("module-port,m", progOpt::value<u_short>(&host_module_port), "Bind module api server to this port")
+        ("p2p-port,p", progOpt::value<u_short>(&host_p2p_port), "Bind p2p server to this port")
+        ("peer-address,A", progOpt::value<std::string>(&peer_address_string), "Try to connect to existing p2p network node at this address")
+        ("peer-port,P", progOpt::value<u_short>(&peer_port), "Try to connect to existing p2p network node at this port")
         ("unreg", "Unrecognized options");
 
         progOpt::positional_options_description pos_desc;
-        pos_desc.add("address", 1);
-        pos_desc.add("port", 1);
+        pos_desc.add("host-address", 1);
+        pos_desc.add("module-port", 1);
+        pos_desc.add("p2p-port", 1);
         pos_desc.add("peer-address", 1);
         pos_desc.add("peer-port", 1);
 
         progOpt::command_line_parser parser{argc, argv};
         parser.options(desc)
-            .allow_unregistered()
+            //.allow_unregistered()
             .positional(pos_desc)
             .style(progOpt::command_line_style::default_style | progOpt::command_line_style::allow_slash_for_short);
         progOpt::parsed_options parsed_options = parser.run();
@@ -891,45 +842,48 @@ int main(int argc, char const *argv[])
         progOpt::store(parsed_options, vm);
         progOpt::notify(vm);
 
-        if (vm.count("help") || vm.count("unreg"))
+        if (vm.count("help"))
         {
             std::cout << desc << "\n";
             return 0;
         }
-        if (vm.count("address"))
-        {
-            //TODO PORT
-        }
-        if (vm.count("port"))
-        {
-            //TODO PORT
-        }
-        /*
-          throws error:
-         for (auto it = vm.begin(); it != vm.end(); ++it) {
-            std::cout << it->first << " : " << it->second.as<std::string>() << std::endl;
-        }*/
 
-        std::cout << "We are on " << host_address_string << ":" << host_port << std::endl;
+        if (vm.count("unreg")) {
+            std::cout << options_description << "\n";
+            return 1;
+        }
+
+        if (host_module_port == host_p2p_port) {
+            std::cerr << "Cannot setup Module API server and P2P server on the same port (" << host_module_port << "). Exiting." << std::endl;
+            return -1;
+        }
+        std::cout << "Modules reach this server on " << host_address_string << ":" << host_module_port << std::endl;
+        std::cout << "We communicate with peers on " << host_address_string << ":" << host_p2p_port << std::endl;
+        if (system(("ping -c1 -s1 " + host_address_string + "  > /dev/null 2>&1").c_str()) != 0) {
+            std::cerr << "Warning: Failed to ping host." << std::endl;
+        }
+
         if (vm.count("peer-address") && vm.count("peer-port")) {
         std::cout << "Trying to connect to existing Network Node " << peer_address_string << ":" << peer_port << std::endl;
             if (!convert_to_ipv6(peer_address_string, peer_address)) {
                 std::cerr << "Please provide a syntactically correct IP address (v4 or v6) for the peer";
                 return 1;
             }
+            if (system(("ping -c1 -s1 " + peer_address_string + "  > /dev/null 2>&1").c_str()) != 0) {
+                std::cerr << "Warning: Failed to ping peer." << std::endl;
+            }
         } else {
             std::cout << "Since no peer to connect to was supplied, setting up new network..." << std::endl;
             connect_to_existing_network = false;
         }
 
-
         // Parsing complete
     }
     catch (std::exception excep)
     {
-        std::cout << "Is the argument parsing a problem?" << std::endl;
-        std::cerr << excep.what() << '\n';
-        std::cout << boost::stacktrace::stacktrace();
+        // passed invalid arguments, e.g. ip to port or similar
+        std::cerr << "Passed invalid arguments. Keep to correct formatting, format IPv4 addresses as 192.168.0.42 and ports separated by space." << std::endl;
+        std::cout << options_description << "\n";
         return -1;
     }
 
@@ -948,16 +902,19 @@ int main(int argc, char const *argv[])
     // then, for case 1 we need Node A to send FIND_NODE to node B that receives a triple from A or how does A present itself to B?
 
 
-    routing_table = RoutingTable(host_address, host_port);
+    routing_table = RoutingTable(host_address, host_p2p_port);
 
     if(connect_to_existing_network) {
         // TODO: connect to existing network
-        // TODO: setup socket + add to connectionMap, then call:
+        // TODO: setup socket + add to connection_map, then call:
         std::cout << "Sending Find Node Request..." << std::endl;
         socket_t peer_socket = setup_connect_socket(peer_address_string, peer_port);
-
-        connectionMap[peer_socket] = {};
-        send_DHT_RPC_find_node(peer_socket, routing_table.get_local_node().id);
+        if (peer_socket == -1) {
+            std::cerr << "Error creating socket. Aborting." << std::endl;
+            return 1;
+        }
+        connection_map[peer_socket] = {};
+        forge_DHT_RPC_find_node(peer_socket, routing_table.get_local_node().id);
         // 1. Send FIND_NODE RPC about our own node to peer (TODO: Don't immediately put our triple in peer's bucket list or else it won't return closer peers but us?)
         // 3. If response includes our own, we have no closer nodes, otherwise we get closer nodes to us
         // 4. Iterate over ever closer nodes
@@ -969,13 +926,85 @@ int main(int argc, char const *argv[])
 
     // Open port for local API traffic from modules
 
-    socket_t module_api_socket = setup_server_socket(ServerConfig::MODULE_API_PORT);
+    socket_t module_api_socket = setup_server_socket(host_module_port);
     int epollfd = epoll_create1(0);
     epollfd = setup_epoll(epollfd, module_api_socket);
-    socket_t p2p_socket = setup_server_socket(ServerConfig::P2P_PORT);
+    socket_t p2p_socket = setup_server_socket(host_p2p_port);
     epollfd = setup_epoll(epollfd, p2p_socket);
     std::vector<epoll_event> epoll_events{64};
-    run_event_loop(module_api_socket, p2p_socket, epollfd, epoll_events);
+
+    if (epollfd == -1 || module_api_socket == -1 || p2p_socket == -1) {
+        std::cerr << "Error creating sockets. Aborting." << std::endl;
+        return 1;
+    }
+
+    std::cout << "Server running... " << std::endl;
+    bool serverIsRunning = true;
+
+
+    // event loop
+
+    while (serverIsRunning) {
+        int eventCount = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), -1);  // dangerous cast
+        // TODO: ADD SERVER MAINTAINENCE. purge storage (ttl), peer-ttl (k-bucket
+        // maintainence) internal management clean up local_storage for all keys,
+        // std::erase if ttl is outdated
+
+        if (eventCount == -1) {
+            serverIsRunning = false;
+            break;
+        }
+        for (int i = 0; i < eventCount; ++i) {
+            auto curEvent = epoll_events[i];
+            if (curEvent.data.fd == module_api_socket) {
+                accept_new_connection(epollfd, curEvent, ConnectionType::MODULE_API);
+            } else if (curEvent.data.fd == p2p_socket) {
+                accept_new_connection(epollfd, curEvent, ConnectionType::P2P);
+            } else {
+                // handle client processing of existing seassions
+                if (curEvent.events & EPOLLIN) {
+                    std::cout << "Received new request." << std::endl;
+                    std::array<unsigned char, 4096> recv_buf{};
+                    auto curfd = curEvent.data.fd;
+                    if (!connection_map.contains(curfd)) {
+                        connection_map.insert_or_assign(curfd, ConnectionInfo{});
+                    }
+                    auto &connection_buffer = connection_map.at(curfd).received_bytes;
+                    while (true) {
+                        // This loop is used in order to pull all bytes that
+                        // reside already on this machine in the kernel socket buffer.
+                        // once this exausts, we try processing.
+                        auto bytesRead = read(curfd, recv_buf.data(), recv_buf.size());
+                        if (bytesRead == 0
+                            || (bytesRead == -1 && errno == EWOULDBLOCK)) {
+                            bool processingStatus = try_processing(curfd);
+                            std::cout << "Processing finished: " << processingStatus
+                                    << std::endl;
+                            if (processingStatus == true) {
+                                // epoll_ctl(epollfd,EPOLL_CTL_DEL,curfd,nullptr);
+                            }
+                            break;
+                        } else if (bytesRead == -1) { // TODO: rutscht immer hier rein in der 2. iteration dieses loops
+                            epoll_ctl(epollfd, EPOLL_CTL_DEL, curfd, nullptr);
+                            connection_map.erase(curfd);
+                            break;
+                        }
+                        connection_buffer.insert(connection_buffer.end(), recv_buf.begin(),
+                                                 recv_buf.begin() + bytesRead);
+
+                        std::cout << std::string_view(reinterpret_cast<const char *>(recv_buf.data()), bytesRead) << "\n";
+                    }
+                }
+                if (curEvent.events & EPOLLOUT)
+                    handle_EPOLLOUT(epollfd,curEvent.data.fd);
+                if (curEvent.events & EPOLLERR) {
+                    epoll_ctl(epollfd, EPOLL_CTL_DEL, curEvent.data.fd, nullptr);
+                    connection_map.erase(curEvent.data.fd);
+                    continue;
+                }
+            }
+        }
+    }
 
     return 0;
 }

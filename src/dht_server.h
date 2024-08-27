@@ -45,17 +45,17 @@ enum class ConnectionType {
 };
 
 struct ConnectionInfo{
-        ConnectionType connectionType;
+        ConnectionType connection_type;
         Key rpc_id;
-        Message receivedBytes;
-        bool receivedBytesInUse;
+        Message received_bytes;
+        bool received_bytes_in_use;
         
-        Message sendBytes; // TODO: This is a todo send buffer. See epoll case EPOLLOUT.
-        size_t sentBytes{0};
-        bool sendBytesInUse;
+        Message send_bytes; // TODO: This is a todo send buffer. See epoll case EPOLLOUT.
+        size_t sent_bytes{0};
+        bool send_bytes_in_use;
 
-        socket_t relayTo{-1}; //Possibly relay the request to other server that sits closer (XOR) to the requested key.
-        socket_t replyTo{};
+        socket_t relay_to{-1}; //Possibly relay the request to other server that sits closer (XOR) to the requested key.
+        socket_t reply_to{};
     };
 
 enum ModuleApiType {
@@ -103,50 +103,50 @@ void build_DHT_header(size_t body_size, u_short message_type, Message& message);
 void write_body(Message& message, size_t body_offset, unsigned char* data, size_t data_size);
 void read_body(const Message& message, size_t body_offset, unsigned char* data, size_t data_size);
 
-bool send_DHT_message(socket_t socket, Message message);
+bool forge_DHT_message(socket_t socket, Message message);
 
-bool send_DHT_put(socket_t socket, Key& key, Value& value);
-bool handle_DHT_put(ConnectionInfo& connect_info);
+bool forge_DHT_put(socket_t socket, Key& key, Value& value);
+bool handle_DHT_put(socket_t socket);
 
-bool send_DHT_get(socket_t socket, Key& key);
-bool handle_DHT_get(ConnectionInfo& connect_info);
+bool forge_DHT_get(socket_t socket, Key& key);
+bool handle_DHT_get(socket_t socket);
 
-bool send_DHT_success(socket_t socket, Key& key, Value& value);
-bool handle_DHT_success(ConnectionInfo& connect_info);
+bool forge_DHT_success(socket_t socket, Key& key, Value& value);
+bool handle_DHT_success(socket_t socket);
 
-bool send_DHT_failure(socket_t socket, Key& key);
-bool handle_DHT_failure(ConnectionInfo& connect_info);
+bool forge_DHT_failure(socket_t socket, Key& key);
+bool handle_DHT_failure(socket_t socket);
 
-bool send_DHT_RPC_ping(socket_t socket);
-bool handle_DHT_RPC_ping(const ConnectionInfo& connect_info, u_short body_size);
-bool send_DHT_RPC_ping_reply(socket_t socket);
-bool handle_DHT_RPC_ping_reply(const ConnectionInfo& connect_info, u_short body_size);
+bool forge_DHT_RPC_ping(socket_t socket);
+bool handle_DHT_RPC_ping(socket_t socket, u_short body_size);
+bool forge_DHT_RPC_ping_reply(socket_t socket);
+bool handle_DHT_RPC_ping_reply(socket_t socket, u_short body_size);
 
-bool send_DHT_RPC_store(socket_t socket, Key& key, Value& value);
-bool handle_DHT_RPC_store(const ConnectionInfo& connect_info, u_short body_size);
-bool send_DHT_RPC_store_reply(socket_t socket, Key& key, Value& value);
-bool handle_DHT_RPC_store_reply(const ConnectionInfo& connect_info, u_short body_size);
+bool forge_DHT_RPC_store(socket_t socket, Key& key, Value& value);
+bool handle_DHT_RPC_store(socket_t socket, u_short body_size);
+bool forge_DHT_RPC_store_reply(socket_t socket, Key& key, Value& value);
+bool handle_DHT_RPC_store_reply(socket_t socket, u_short body_size);
 
-bool send_DHT_RPC_find_node(socket_t socket, NodeID node_id);
-bool handle_DHT_RPC_find_node(const ConnectionInfo& connect_info, u_short body_size);
-bool send_DHT_RPC_find_node_reply(socket_t socket, Key rpc_id,  std::vector<Node> closest_nodes);
-bool handle_DHT_RPC_find_node_reply(const ConnectionInfo& connect_info, u_short body_size);
+bool forge_DHT_RPC_find_node(socket_t socket, NodeID node_id);
+bool handle_DHT_RPC_find_node(socket_t socket, u_short body_size);
+bool forge_DHT_RPC_find_node_reply(socket_t socket, Key rpc_id,  std::vector<Node> closest_nodes);
+bool handle_DHT_RPC_find_node_reply(socket_t socket, u_short body_size);
 
-bool send_DHT_RPC_find_value(socket_t socket, Key& key, Value& value);
-bool handle_DHT_RPC_find_value(const ConnectionInfo& connect_info, u_short body_size);
-bool send_DHT_RPC_find_value_reply(socket_t socket, Key& key, Value& value);
-bool handle_DHT_RPC_find_value_reply(const ConnectionInfo& connect_info, u_short body_size);
+bool forge_DHT_RPC_find_value(socket_t socket, Key& key, Value& value);
+bool handle_DHT_RPC_find_value(socket_t socket, u_short body_size);
+bool forge_DHT_RPC_find_value_reply(socket_t socket, Key& key, Value& value);
+bool handle_DHT_RPC_find_value_reply(socket_t socket, u_short body_size);
 
-bool send_DHT_error(socket_t socket, ErrorType error);
-bool handle_DHT_error(const ConnectionInfo& connect_info, u_short body_size);
+bool forge_DHT_error(socket_t socket, ErrorType error);
+bool handle_DHT_error(socket_t socket, u_short body_size);
 
 bool parse_header(const ConnectionInfo &connectInfo, u_short &message_size, u_short &dht_type);
-bool parse_API_request(ConnectionInfo &connectInfo, u_short body_size, ModuleApiType module_api_type);
-bool parse_P2P_request(ConnectionInfo& connectInfo, u_short body_size, P2PType p2p_type);
+bool parse_API_request(socket_t socket, u_short body_size, ModuleApiType module_api_type);
+bool parse_P2P_request(socket_t socket, u_short body_size, P2PType p2p_type);
 
 ProcessingStatus try_processing(socket_t curfd);
 
-void accept_new_connection(int epollfd, std::vector<epoll_event>::value_type curEvent, ConnectionType connectionType);
+void accept_new_connection(int epollfd, std::vector<epoll_event>::value_type cur_event, ConnectionType connection_type);
 void run_event_loop(socket_t module_api_socket, socket_t p2p_socket, int epollfd, std::vector<epoll_event>& epoll_events);
 
 socket_t setup_server_socket(u_short port);
