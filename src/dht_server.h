@@ -55,7 +55,6 @@ struct ConnectionInfo{
         bool send_bytes_in_use;
 
         socket_t relay_to{-1}; //Possibly relay the request to other server that sits closer (XOR) to the requested key.
-        socket_t reply_to{};
     };
 
 enum ModuleApiType {
@@ -84,6 +83,7 @@ enum ErrorType {
     DHT_SERVER_ERROR = 20,
 };
 
+bool operator==(const Node& lhs, const Node& rhs);
 bool operator<(const Key& lhs, const Key& rhs);
 bool operator<=(const Key& lhs, const Key& rhs);
 bool operator==(const Key& lhs, const Key& rhs);
@@ -119,12 +119,12 @@ bool handle_DHT_failure(socket_t socket);
 
 bool forge_DHT_RPC_ping(socket_t socket);
 bool handle_DHT_RPC_ping(socket_t socket, u_short body_size);
-bool forge_DHT_RPC_ping_reply(socket_t socket);
+bool forge_DHT_RPC_ping_reply(socket_t socket, Key rpc_id);
 bool handle_DHT_RPC_ping_reply(socket_t socket, u_short body_size);
 
-bool forge_DHT_RPC_store(socket_t socket, Key& key, Value& value);
+bool forge_DHT_RPC_store(socket_t socket, int TTL, int replication, Key& key, Value& value);
 bool handle_DHT_RPC_store(socket_t socket, u_short body_size);
-bool forge_DHT_RPC_store_reply(socket_t socket, Key& key, Value& value);
+bool forge_DHT_RPC_store_reply(socket_t socket, Key rpc_id, Key& key, Value& value);
 bool handle_DHT_RPC_store_reply(socket_t socket, u_short body_size);
 
 bool forge_DHT_RPC_find_node(socket_t socket, NodeID node_id);
@@ -134,7 +134,7 @@ bool handle_DHT_RPC_find_node_reply(socket_t socket, u_short body_size);
 
 bool forge_DHT_RPC_find_value(socket_t socket, Key& key, Value& value);
 bool handle_DHT_RPC_find_value(socket_t socket, u_short body_size);
-bool forge_DHT_RPC_find_value_reply(socket_t socket, Key& key, Value& value);
+bool forge_DHT_RPC_find_value_reply(socket_t socket, Key rpc_id, Key& key, Value& value);
 bool handle_DHT_RPC_find_value_reply(socket_t socket, u_short body_size);
 
 bool forge_DHT_error(socket_t socket, ErrorType error);
