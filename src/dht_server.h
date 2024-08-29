@@ -103,34 +103,34 @@ void build_DHT_header(size_t body_size, u_short message_type, Message& message);
 void write_body(Message& message, size_t body_offset, unsigned char* data, size_t data_size);
 void read_body(const Message& message, size_t body_offset, unsigned char* data, size_t data_size);
 
-bool forge_DHT_message(socket_t socket, Message message);
+bool forge_DHT_message(socket_t socket, Message message, int epollfd = -1);
 
 bool forge_DHT_put(socket_t socket, Key& key, Value& value);
-bool handle_DHT_put(socket_t socket);
+bool handle_DHT_put(socket_t socket, u_short body_size);
 
 bool forge_DHT_get(socket_t socket, Key& key);
-bool handle_DHT_get(socket_t socket);
+bool handle_DHT_get(socket_t socket, u_short body_size);
 
 bool forge_DHT_success(socket_t socket, Key& key, Value& value);
-bool handle_DHT_success(socket_t socket);
+bool handle_DHT_success(socket_t socket, u_short body_size);
 
 bool forge_DHT_failure(socket_t socket, Key& key);
-bool handle_DHT_failure(socket_t socket);
+bool handle_DHT_failure(socket_t socket, u_short body_size);
 
 bool forge_DHT_RPC_ping(socket_t socket);
 bool handle_DHT_RPC_ping(socket_t socket, u_short body_size);
 bool forge_DHT_RPC_ping_reply(socket_t socket, Key rpc_id);
 bool handle_DHT_RPC_ping_reply(socket_t socket, u_short body_size);
 
-bool forge_DHT_RPC_store(socket_t socket, int TTL, int replication, Key& key, Value& value);
+bool forge_DHT_RPC_store(socket_t socket, u_short time_to_live, int replication, Key& key, Value& value);
 bool handle_DHT_RPC_store(socket_t socket, u_short body_size);
 bool forge_DHT_RPC_store_reply(socket_t socket, Key rpc_id, Key& key, Value& value);
 bool handle_DHT_RPC_store_reply(socket_t socket, u_short body_size);
 
 bool forge_DHT_RPC_find_node(socket_t socket, NodeID node_id);
 bool handle_DHT_RPC_find_node(socket_t socket, u_short body_size);
-bool forge_DHT_RPC_find_node_reply(socket_t socket, Key rpc_id,  std::vector<Node> closest_nodes);
-bool handle_DHT_RPC_find_node_reply(socket_t socket, u_short body_size);
+bool forge_DHT_RPC_find_node_reply(socket_t socket, Key rpc_id, std::vector<Node> closest_nodes);
+bool handle_DHT_RPC_find_node_reply(socket_t socket, u_short body_size, std::set<Node>* closest_nodes_ptr = nullptr, std::mutex* returned_nodes_mutex_ptr = nullptr);
 
 bool forge_DHT_RPC_find_value(socket_t socket, Key& key, Value& value);
 bool handle_DHT_RPC_find_value(socket_t socket, u_short body_size);
@@ -150,7 +150,9 @@ void accept_new_connection(int epollfd, std::vector<epoll_event>::value_type cur
 void run_event_loop(socket_t module_api_socket, socket_t p2p_socket, int epollfd, std::vector<epoll_event>& epoll_events);
 
 socket_t setup_server_socket(u_short port);
-socket_t setup_connect_socket(std::string address_string, u_short port);
-int setup_epoll(int epollfd, socket_t serversocket);
+socket_t setup_connect_socket(const in6_addr& address, u_short port);
+int setup_epollin(int epollfd, socket_t serversocket);
+
+void handle_EPOLLIN(auto epollfd, epoll_event current_event);
 
 int parse_commandline_args(int argc, const char* argv[]);

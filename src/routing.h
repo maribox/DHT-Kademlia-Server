@@ -12,6 +12,7 @@
 #include "common_types.h"
 
 extern const size_t K;
+extern const size_t ALPHA;
 
 class KBucket {
    private:
