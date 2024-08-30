@@ -20,6 +20,7 @@
 static constexpr size_t RPC_ID_SIZE  = KEY_SIZE;
 static constexpr size_t NODE_ID_SIZE  = KEY_SIZE;
 static constexpr size_t HEADER_SIZE  = 4;
+static constexpr size_t RPC_SUB_HEADER_SIZE  = NODE_ID_SIZE + 2 + RPC_ID_SIZE;
 static constexpr size_t NODE_SIZE  = 16 + 2 + 32; // using 16B for ipv6 instead of ipv4 as defined in midterm
 
 using Message = std::vector<unsigned char>;
@@ -29,9 +30,10 @@ using socket_t  = int;
 enum ProcessingStatus{
     WAIT_FOR_COMPLETE_MESSAGE_HEADER = 0,
     WAIT_FOR_COMPLETE_MESSAGE_BODY = 1,
-    PROCESSED = 1<<1,
-    WAIT_FOR_RELAY_SEND = 1<<2,
-    WAIT_FOR_RELAY_ANSWER = 1<<3,
+    PROCESSED_AND_OPEN = 1<<1,
+    PROCESSED_AND_CLOSE = 1<<2,
+    //WAIT_FOR_RELAY_SEND = 1<<2,
+    //WAIT_FOR_RELAY_ANSWER = 1<<3,
     ERROR = 1<<4
 };
 
@@ -46,6 +48,9 @@ enum class ConnectionType {
 
 struct ConnectionInfo{
         ConnectionType connection_type;
+        in6_addr client_addr;
+        u_short client_port; // port in host byte order
+
         Key rpc_id;
         Message received_bytes;
         bool received_bytes_in_use;
@@ -89,6 +94,7 @@ bool operator<=(const Key& lhs, const Key& rhs);
 bool operator==(const Key& lhs, const Key& rhs);
 
 std::string key_to_string(const Key& key);
+std::string ip_to_string(const in6_addr& ip);
 
 std::optional<Value> get_from_storage(const Key& key);
 void save_to_storage(const Key& key, Value val);
@@ -99,7 +105,7 @@ bool is_valid_module_API_type(u_short value);
 bool is_valid_P2P_type(u_short value);
 bool is_valid_DHT_type(u_short dht_type);
 
-void build_DHT_header(size_t body_size, u_short message_type, Message& message);
+void build_DHT_header(Message& message, size_t message_size, u_short message_type);
 void write_body(Message& message, size_t body_offset, unsigned char* data, size_t data_size);
 void read_body(const Message& message, size_t body_offset, unsigned char* data, size_t data_size);
 
@@ -127,12 +133,12 @@ bool handle_DHT_RPC_store(socket_t socket, u_short body_size);
 bool forge_DHT_RPC_store_reply(socket_t socket, Key rpc_id, Key& key, Value& value);
 bool handle_DHT_RPC_store_reply(socket_t socket, u_short body_size);
 
-bool forge_DHT_RPC_find_node(socket_t socket, NodeID node_id);
+bool forge_DHT_RPC_find_node(socket_t socket, NodeID target_node_id);
 bool handle_DHT_RPC_find_node(socket_t socket, u_short body_size);
 bool forge_DHT_RPC_find_node_reply(socket_t socket, Key rpc_id, std::vector<Node> closest_nodes);
 bool handle_DHT_RPC_find_node_reply(socket_t socket, u_short body_size, std::set<Node>* closest_nodes_ptr = nullptr, std::mutex* returned_nodes_mutex_ptr = nullptr);
 
-bool forge_DHT_RPC_find_value(socket_t socket, Key& key, Value& value);
+bool forge_DHT_RPC_find_value(socket_t socket, Key& key);
 bool handle_DHT_RPC_find_value(socket_t socket, u_short body_size);
 bool forge_DHT_RPC_find_value_reply(socket_t socket, Key rpc_id, Key& key, Value& value);
 bool handle_DHT_RPC_find_value_reply(socket_t socket, u_short body_size);
@@ -150,9 +156,9 @@ void accept_new_connection(int epollfd, std::vector<epoll_event>::value_type cur
 void run_event_loop(socket_t module_api_socket, socket_t p2p_socket, int epollfd, std::vector<epoll_event>& epoll_events);
 
 socket_t setup_server_socket(u_short port);
-socket_t setup_connect_socket(const in6_addr& address, u_short port);
+socket_t setup_connect_socket(const in6_addr& address, u_short port, const ConnectionInfo &connection_info);
 int setup_epollin(int epollfd, socket_t serversocket);
 
-void handle_EPOLLIN(auto epollfd, epoll_event current_event);
+bool handle_EPOLLIN(auto epollfd, epoll_event current_event);
 
 int parse_commandline_args(int argc, const char* argv[]);

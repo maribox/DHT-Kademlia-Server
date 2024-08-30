@@ -27,6 +27,7 @@ class KBucket {
         return this->start == other.start && this->end == other.end;
     }
     bool add_peer(const Node &peer);
+    bool contains(const Node &);
     NodeID get_start() const;
     NodeID get_end() const;
     const std::list<Node>& get_peers() const;
@@ -44,6 +45,7 @@ class RoutingTable {
     void add_peer(const Node& peer);
     void split_bucket();
 
+    bool contains(const Node &node);
     size_t get_bucket_for(NodeID key);
 
     std::vector<Node> find_closest_nodes(NodeID node_id);

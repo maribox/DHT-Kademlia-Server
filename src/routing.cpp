@@ -44,6 +44,10 @@ bool KBucket::add_peer(const Node &peer) { // returns true if inserted or alread
     }
 }
 
+bool KBucket::contains(const Node &node) {
+    return std::find(peers.begin(), peers.end(), node) != peers.end();
+}
+
 NodeID KBucket::get_start() const {
     return this->start;
 }
@@ -58,6 +62,10 @@ const std::list<Node>& KBucket::get_peers() const {
 
 const std::list<Node>& KBucket::get_replacement_cache() const{
     return replacement_cache;
+}
+
+bool RoutingTable::contains(const Node &node) {
+    return bucket_list[get_bucket_for(node.id)].contains(node);
 }
 
 size_t RoutingTable::get_bucket_for(NodeID node_id) {
