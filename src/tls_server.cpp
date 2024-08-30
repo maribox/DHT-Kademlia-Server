@@ -8,8 +8,14 @@
 #include <iomanip>
 #include <unordered_map>
 #include <cstdint>  // for uintptr_t
+#include <signal.h>
+#include <unistd.h>  // For sleep()
+
 
 #define P2PServerPort 7402
+
+
+
 
 
 int main(int argc, char const *argv[])
@@ -137,18 +143,23 @@ int main(int argc, char const *argv[])
             std::cerr << "Server: SSL object null pointer" << std::endl;
         }
         SSL_set_fd(ssl, client_fd);
+
+        check_ssl_blocking_mode(ssl);
+
         int ret = SSL_accept(ssl);
-        if(!ret){
-            std::cerr << "Server: SSL accept failed null pointer" << std::endl;
+        if (ret <= 0) {
+            int err = SSL_get_error(ssl, ret);
+            std::cerr << "SSL accept error: " << err << std::endl;
+            ERR_print_errors_fp(stderr);
+            // Handle the error based on the error code (e.g., try again, log, exit)
         }
         ERR_print_errors_fp(stderr);
-        
+
         
         //Transmit data securely over ssl encrypted socket (ssl)
-        write_test_msg(ssl);
+        char msg_buffer[256];
         
-
-        std::cout << "Test message written." << std::endl;
+        read_test_msg(ssl,msg_buffer, 256);
 
         //Clean everything;
         EVP_PKEY_free(pkey);
@@ -231,25 +242,24 @@ int main(int argc, char const *argv[])
         }
         ssl = SSL_new(ctx);
         SSL_set_fd(ssl, sock_fd);
+        
+        check_ssl_blocking_mode(ssl);
 
 
-        //Init connection
-        if (SSL_connect(ssl) <= 0) {
-            std::cerr << "Error connecting client ssl to server." << std::endl; 
-        } else {
-            std::cout << "SSL Connection established and verified." << std::endl;
+        int ret = SSL_connect(ssl);
+        if (ret <= 0) {
+            int err = SSL_get_error(ssl, ret);
+            std::cerr << "SSL connect error: " << err << std::endl;
+            ERR_print_errors_fp(stderr);
+            // Handle the error based on the error code (e.g., try again, log, exit)
         }
-
-
-        char msg_buffer[256];
         
-        read_test_msg(ssl,msg_buffer, 256);
-
-        std::printf("%s\n",msg_buffer);
-        
+        write_test_msg(ssl);
+        sleep(1);
 
         std::cout << "Client exited regularly." << std::endl;
         //Clean up
+        
     }
 
     SSL_shutdown(ssl);

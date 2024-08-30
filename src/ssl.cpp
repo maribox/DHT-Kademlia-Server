@@ -25,6 +25,33 @@
 
 using CertificateMap = std::unordered_map<std::string, std::string>; //maps IDs to certificates
 
+#include <fcntl.h>
+#include <unistd.h>
+#include <iostream>
+
+bool is_non_blocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        std::cerr << "fcntl failed" << std::endl;
+        return false;
+    }
+    return (flags & O_NONBLOCK) != 0;
+}
+
+void check_ssl_blocking_mode(SSL *ssl) {
+    int fd = SSL_get_fd(ssl);
+    if (fd == -1) {
+        std::cerr << "SSL_get_fd failed" << std::endl;
+        return;
+    }
+
+    if (is_non_blocking(fd)) {
+        std::cout << "SSL operations are non-blocking." << std::endl;
+    } else {
+        std::cout << "SSL operations are blocking." << std::endl;
+    }
+}
+
 bool getIPv6(char* buffer, size_t size){
     ifaddrs *interfaces, *ifa;
     char ipstr[INET6_ADDRSTRLEN];
