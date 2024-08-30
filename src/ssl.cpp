@@ -14,8 +14,225 @@
 #include <string.h>
 #include <array>
 #include <cstring>
+#include <cstring>
+#include <sstream>
+#include <fstream>
+#include <unordered_map>
+#include <cstdint>  // for uintptr_t
+#include <ifaddrs.h>
 
 #include <iomanip>
+
+using CertificateMap = std::unordered_map<std::string, std::string>; //maps IDs to certificates
+
+bool getIPv6(char* buffer, size_t size){
+    ifaddrs *interfaces, *ifa;
+    char ipstr[INET6_ADDRSTRLEN];
+
+    if (getifaddrs(&interfaces) == -1) {
+        std::cerr << "getifaddrs failed, unable to find IPv6 addr." << std::endl;
+        return false;
+    }
+
+    for(ifa = interfaces; ifa != 0; ifa= ifa->ifa_next){
+        if(ifa->ifa_addr == NULL){
+            continue;
+        }
+        if(ifa->ifa_addr->sa_family == AF_INET6){
+            struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)ifa->ifa_addr;
+
+            if(inet_ntop(AF_INET6,&ipv6->sin6_addr,ipstr,size) != NULL){
+                std::strncpy(buffer,ipstr, size);
+                freeifaddrs(interfaces); // Free memory and exit early
+                return true;
+            }
+        }
+    }
+    //No IPv6 interface available.
+    freeifaddrs(interfaces);
+    return false;
+
+}
+
+// Function to save the private key to a file
+void save_private_key(EVP_PKEY* pkey, const std::string& filename) {
+    FILE* file = fopen(filename.c_str(), "w+b"); //write as new binary file (w+b inary)
+    if (file) {
+        PEM_write_PrivateKey(file, pkey, nullptr, nullptr, 0, nullptr, nullptr);
+        fclose(file);
+    } else {
+        std::cerr << "Failed opening file for writing private key" << std::endl;
+    }
+}
+
+void save_public_key(EVP_PKEY* pkey, const std::string& filename) {
+    FILE* file = fopen(filename.c_str(), "w+b"); //write as new binary file (w+b inary)
+    if (file) {
+        PEM_write_PUBKEY(file, pkey);
+        fclose(file);
+    } else {
+        std::cerr << "Failed opening file for writing public key" << std::endl;
+    }
+}
+
+void save_certificate(X509* cert, const std::string& filename) {
+    FILE* file = fopen(filename.c_str(), "w+b"); //write as new binary file (w+b inary)
+    if (file) {
+        PEM_write_X509(file, cert);
+        fclose(file);
+    } else {
+        std::cerr << "Failed opening file for writing certificate" << std::endl;
+    }
+}
+
+
+
+// Function to load the certificate map from a file
+CertificateMap load_certificate_map(const std::string& filename) {
+    CertificateMap cert_map;
+    std::ifstream file(filename);
+
+    if (file.is_open()) {
+        std::string id, cert;
+        while (std::getline(file, id)) {
+            std::ostringstream cert_stream;
+            std::string line;
+            while (std::getline(file, line) && !line.empty()) {
+                cert_stream << line << "\n";
+            }
+            cert_map[id] = cert_stream.str();
+        }
+        file.close();
+    }
+    return cert_map;
+}
+
+// Function to save the certificate map to a file
+void save_certificate_map(const CertificateMap& cert_map, const std::string& filename) {
+    std::ofstream file(filename, std::ios::trunc);
+
+    if (file.is_open()) {
+        for (const auto& pair : cert_map) {
+            file << pair.first << "\n" << pair.second << "\n\n";
+        }
+        file.close();
+    }
+}
+
+// Helper function to convert binary data to a hexadecimal string (ID conversion)
+std::string bin_to_hex(const unsigned char* data, size_t len) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < len; ++i) {
+        oss << std::setw(2) << std::setfill('0') << std::hex << (int)data[i];
+    }
+    return oss.str();
+}
+
+
+// Function to send data with length prefix
+void send_data_with_length_prefix(int sock_fd, const char* data, size_t length) {
+    // Prefix: 4 bytes for length
+    uint32_t data_length = static_cast<uint32_t>(length);
+    uint32_t net_length = htonl(data_length);
+
+    // Send the length prefix
+    if (send(sock_fd, &net_length, sizeof(net_length), 0) == -1) {
+        perror("send: length prefix");
+        return;
+    }
+
+    // Send the actual data
+    if (send(sock_fd, data, length, 0) == -1) {
+        perror("send: data");
+    }
+}
+
+// Function to send the and certificate
+void send_certificate(int client_fd, X509* cert) {
+
+    // Send certificate
+    BIO *bio = BIO_new(BIO_s_mem());
+    PEM_write_bio_X509(bio, cert);
+    int cert_len = BIO_pending(bio);
+    char* cert_data = (char*)malloc(cert_len);
+    BIO_read(bio, cert_data, cert_len);
+    BIO_free(bio);
+
+    send_data_with_length_prefix(client_fd, cert_data, cert_len);
+    free(cert_data);
+}
+
+
+// Function to receive data with length prefix
+char* receive_data_with_length_prefix(int sock_fd, size_t& length) {
+    // Receive the length prefix
+    uint32_t net_length;
+    if (recv(sock_fd, &net_length, sizeof(net_length), 0) <= 0) {
+        perror("recv: length prefix");
+        return nullptr;
+    }
+    uint32_t data_length = ntohl(net_length);
+    std::cout << "Length prefix was:" << data_length << std::endl;
+    // Allocate buffer for the data
+    char* buffer = (char*)malloc(data_length);
+    if (buffer == nullptr) {
+        std::cerr << "Memory allocation failed." << std::endl;
+        return nullptr;
+    }
+
+    // Receive the actual data
+    size_t total_received = 0;
+    while (total_received < data_length) {
+        ssize_t bytes_received = recv(sock_fd, buffer + total_received, data_length - total_received, 0);
+        if (bytes_received <= 0) {
+            perror("recv: data");
+            free(buffer);
+            return nullptr;
+        }
+        total_received += bytes_received;
+    }
+
+    std::cout << "Data that was transmitted:\n" << std::string(buffer,data_length);
+
+    length = data_length;
+    return buffer;
+}
+
+// Function to receive the certificate
+void receive_certificate(int sock_fd, X509*& cert) {
+    size_t length;
+
+
+    // Receive certificate
+    char* cert_data = receive_data_with_length_prefix(sock_fd, length);
+    if (!cert_data) {
+        std::cerr << "Failed to receive certificate data" << std::endl;
+        return;
+    }
+
+    BIO *bio = BIO_new_mem_buf(cert_data, length);
+    if (!bio) {
+        std::cerr << "Failed to create BIO for certificate" << std::endl;
+        free(cert_data);
+        return;
+    }
+
+    cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+    if (!cert) {
+        std::cerr << "Failed to read certificate" << std::endl;
+        ERR_print_errors_fp(stderr);
+    }
+
+    BIO_free(bio);
+    free(cert_data);
+}
+
+
+
+
+
+
+//-----
 
 void print_hex(const unsigned char *s, size_t length)
 {
@@ -54,50 +271,9 @@ EVP_PKEY* generate_rsa_key() {
     return pkey;
 }
 
-
-X509* create_self_signed_cert_depr(EVP_PKEY* pkey, const std::string& ipv6, const std::string& id) {
-    X509* x509 = X509_new();
-    X509_set_version(x509, 2);  //X509 Version 3 (index starting at 0 represents version 1)
-    ASN1_INTEGER_set(X509_get_serialNumber(x509), 1); //Set serial number to 1
-    X509_gmtime_adj(X509_getm_notBefore(x509), 0); //Now + 0 seconds
-    X509_gmtime_adj(X509_getm_notBefore(x509), 31536000L); //Now + 1 year
-    X509_set_pubkey(x509, pkey);
-
-    //Own name, as we self-issue (self-sign)
-    X509_NAME* name = X509_get_subject_name(x509);
-    X509_NAME_add_entry_by_txt(name, "C", MBSTRING_ASC, (const unsigned char*) "DE", -1, -1, 0);
-    X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC, (const unsigned char*)"TUM, Technical University Munich", -1, -1, 0);
-    X509_set_issuer_name(x509, name);
-
-    // Add IPv6 and custom 256-bit ID as extensions
-    X509_EXTENSION* ext;
-    STACK_OF(X509_EXTENSION) *exts = sk_X509_EXTENSION_new_null();
-
-    // IPv6 address
-    ext = X509V3_EXT_conf_nid(nullptr, nullptr, NID_subject_alt_name, ("IP:" + ipv6).c_str());
-    sk_X509_EXTENSION_push(exts, ext);
-
-    // Custom 256-bit ID:
-    // Create an ASN1_OCTET_STRING to hold the 256-bit ID
-    ASN1_OCTET_STRING* octet_string = ASN1_OCTET_STRING_new();
-    ASN1_OCTET_STRING_set(octet_string, (const unsigned char*)id.c_str(), id.size());
-
-    ext = X509_EXTENSION_create_by_NID(nullptr, NID_userId, 0, octet_string);
-    sk_X509_EXTENSION_push(exts, ext);
-
-    for (int i = 0; i < sk_X509_EXTENSION_num(exts); i++) {
-        X509_add_ext(x509, sk_X509_EXTENSION_value(exts, i), -1);
-    }
-    sk_X509_EXTENSION_pop_free(exts, X509_EXTENSION_free);
-    ASN1_OCTET_STRING_free(octet_string);
-
-    X509_sign(x509, pkey, EVP_sha256()); //sign certificate with private key.
-    return x509;
-}
-
 X509* create_self_signed_cert(EVP_PKEY* pkey, const std::string& ipv6, const std::string& id) {
 
-X509* x509 = X509_new();
+    X509* x509 = X509_new();
     if (!x509) {
         std::cerr << "Failed to create X509 object" << std::endl;
         return nullptr;
@@ -201,27 +377,27 @@ SSL_CTX* create_context(bool am_i_server) {
 // Function to extract IPv6 address from the Subject Alternative Name extension
 bool extract_ipv6_from_cert(X509* cert, std::string& ipv6) {
     // Get the Subject Alternative Name extension
-    int ext_index = X509_get_ext_by_NID(cert, NID_subject_alt_name, -1);
-    if (ext_index < 0) return false;
+    X509_EXTENSION* ext = X509_get_ext(cert, X509_get_ext_by_NID(cert, NID_subject_alt_name, -1));
+    if (!ext) return false;
 
-    X509_EXTENSION* ext = X509_get_ext(cert, ext_index);
     GENERAL_NAMES* general_names = (GENERAL_NAMES*)X509V3_EXT_d2i(ext);
+    if (!general_names) return false;
 
-    if (general_names) {
-        for (int i = 0; i < sk_GENERAL_NAME_num(general_names); ++i) {
-            GENERAL_NAME* gn = sk_GENERAL_NAME_value(general_names, i);
-            if (gn->type == GEN_IPADD) {
-                char buf[INET6_ADDRSTRLEN];
-                if (inet_ntop(AF_INET6, &gn->d.ip, buf, sizeof(buf))) {
-                    ipv6 = buf;
-                    sk_GENERAL_NAME_pop_free(general_names, GENERAL_NAME_free);
-                    return true;
-                }
+    bool found = false;
+    for (int i = 0; i < sk_GENERAL_NAME_num(general_names); ++i) {
+        GENERAL_NAME* gn = sk_GENERAL_NAME_value(general_names, i);
+        if (gn->type == GEN_IPADD && gn->d.ip->length == 16) { // Check if it's an IPv6 address
+            char buf[INET6_ADDRSTRLEN];
+            if (inet_ntop(AF_INET6, gn->d.ip->data, buf, sizeof(buf))) {
+                ipv6 = buf;
+                found = true;
+                break;
             }
         }
-        sk_GENERAL_NAME_pop_free(general_names, GENERAL_NAME_free);
     }
-    return false;
+
+    sk_GENERAL_NAME_pop_free(general_names, GENERAL_NAME_free);
+    return found;
 }
 
 // Function to extract custom ID from a specific extension
@@ -246,104 +422,14 @@ bool extract_custom_id(X509* cert, unsigned char* received_id, size_t id_len) {
         std::cout << "\nError 3" << std::endl;
         return false; // No data found
     }
-    std::string s1((char*)octet_string->data,32);
-    std::cout << "Received ID: " << std::hex << s1 <<std::endl;
-
-    
-
-    std::cout << "Id length of provided field " << octet_string->length << std::endl;
     
     // Copy the data to the provided buffer
     std::memcpy(received_id, octet_string->data, 32);
     
-    std::cout << "Received ID as hex ";
+    std::cout << "Received ID as hex: ";
     print_hex(received_id, 32);
     return true; // Successfully extracted the ID
 }
-
-std::string extract_ipv6(X509* cert) {
-    int ext_index = X509_get_ext_by_NID(cert, NID_subject_alt_name, -1);
-    if (ext_index == -1) {
-        return "";
-    }
-    
-    X509_EXTENSION* ext = X509_get_ext(cert, ext_index);
-    if (!ext) {
-        return "";
-    }
-
-    GENERAL_NAMES* names = static_cast<GENERAL_NAMES*>(X509V3_EXT_d2i(ext));
-    if (!names) {
-        return "";
-    }
-
-    std::string ipv6_address;
-    for (int i = 0; i < sk_GENERAL_NAME_num(names); ++i) {
-        GENERAL_NAME* name = sk_GENERAL_NAME_value(names, i);
-        if (name->type == GEN_IPADD) {
-            const unsigned char* ip = name->d.iPAddress->data;
-            if (name->d.iPAddress->length == 16) { // IPv6 is 16 bytes
-                char str[INET6_ADDRSTRLEN];
-                if (inet_ntop(AF_INET6, ip, str, sizeof(str))) {
-                    ipv6_address = str;
-                }
-            }
-        }
-    }
-
-    GENERAL_NAMES_free(names);
-    return ipv6_address;
-}
-
-bool extract_id_from_cert_dep(X509* cert, unsigned char* received_id, size_t id_len) {
-    if (!cert || !received_id || id_len < 32) {
-        std::cerr << "Invalid arguments passed to extract_id_from_cert" << std::endl;
-        return false;
-    }
-
-    X509_NAME* subject_name = X509_get_subject_name(cert);
-    if (!subject_name) {
-        std::cerr << "Failed to get subject name from certificate." << std::endl;
-        return false;
-    }
-
-    int idx = X509_NAME_get_index_by_NID(subject_name, NID_userId, -1);
-    if (idx < 0) {
-        std::cerr << "User ID not found in the certificate." << std::endl;
-        return false;
-    }
-
-    X509_NAME_ENTRY* entry = X509_NAME_get_entry(subject_name, idx);
-    if (!entry) {
-        std::cerr << "Failed to get X509 name entry for user ID." << std::endl;
-        return false;
-    }
-
-    ASN1_STRING* asn1_string = X509_NAME_ENTRY_get_data(entry);
-    if (!asn1_string) {
-        std::cerr << "Failed to get ASN1 string from X509 name entry." << std::endl;
-        return false;
-    }
-
-    const unsigned char* id_ptr = ASN1_STRING_get0_data(asn1_string);
-    if (!id_ptr) {
-        std::cerr << "Failed to get data from ASN1 string." << std::endl;
-        return false;
-    }
-
-    // Check the length of the ASN1 string
-    int asn1_length = ASN1_STRING_length(asn1_string);
-    if (asn1_length < 32) {
-        std::cerr << "User ID length is shorter than expected." << std::endl;
-        return false;
-    }
-
-    // Copy the ID into the buffer
-    memcpy(received_id, id_ptr, 32);
-    return true;
-}
-
-
 
 
 void write_test_msg(SSL* ssl){
@@ -365,7 +451,6 @@ void write_test_msg(SSL* ssl){
     return;
 }
 
-
 void read_test_msg(SSL* ssl, char * buffer, size_t buflen){
     int bytes_read = SSL_read(ssl, buffer, buflen-1);
 
@@ -383,4 +468,111 @@ void read_test_msg(SSL* ssl, char * buffer, size_t buflen){
             std::cerr << "SSL read error 2" << std::endl;
         }
     }
+}
+
+bool compare_x509_certs(X509* cert1, X509* cert2) {
+    if (!cert1 || !cert2) {
+        return false;
+    }
+
+    // Compare the serial numbers
+    const ASN1_INTEGER* serial1 = X509_get_serialNumber(cert1);
+    const ASN1_INTEGER* serial2 = X509_get_serialNumber(cert2);
+    if (ASN1_INTEGER_cmp(serial1, serial2) != 0) {
+        return false;
+    }
+
+    // Compare the issuer names
+    X509_NAME* issuer1 = X509_get_issuer_name(cert1);
+    X509_NAME* issuer2 = X509_get_issuer_name(cert2);
+    if (X509_NAME_cmp(issuer1, issuer2) != 0) {
+        return false;
+    }
+
+    // Compare the subject names
+    X509_NAME* subject1 = X509_get_subject_name(cert1);
+    X509_NAME* subject2 = X509_get_subject_name(cert2);
+    if (X509_NAME_cmp(subject1, subject2) != 0) {
+        return false;
+    }
+
+    // Compare the public keys
+    EVP_PKEY* pkey1 = X509_get_pubkey(cert1);
+    EVP_PKEY* pkey2 = X509_get_pubkey(cert2);
+    if (!EVP_PKEY_eq(pkey1, pkey2)) {
+        EVP_PKEY_free(pkey1);
+        EVP_PKEY_free(pkey2);
+        return false;
+    }
+    EVP_PKEY_free(pkey1);
+    EVP_PKEY_free(pkey2);
+
+    // Compare the extensions
+    int ext_count1 = X509_get_ext_count(cert1);
+    int ext_count2 = X509_get_ext_count(cert2);
+    if (ext_count1 != ext_count2) {
+        return false;
+    }
+
+    for (int i = 0; i < ext_count1; ++i) {
+        X509_EXTENSION* ext1 = X509_get_ext(cert1, i);
+        X509_EXTENSION* ext2 = X509_get_ext(cert2, i);
+
+        // Compare the extensions' NID (type)
+        int nid1 = OBJ_obj2nid(X509_EXTENSION_get_object(ext1));
+        int nid2 = OBJ_obj2nid(X509_EXTENSION_get_object(ext2));
+        if (nid1 != nid2) {
+            return false;
+        }
+
+        // Compare the extensions' data
+        ASN1_OCTET_STRING* data1 = X509_EXTENSION_get_data(ext1);
+        ASN1_OCTET_STRING* data2 = X509_EXTENSION_get_data(ext2);
+        if (ASN1_OCTET_STRING_cmp(data1, data2) != 0) {
+            return false;
+        }
+    }
+
+    // Compare the entire DER-encoded certificates
+    int len1, len2;
+    unsigned char *der1 = nullptr, *der2 = nullptr;
+    len1 = i2d_X509(cert1, &der1);
+    len2 = i2d_X509(cert2, &der2);
+    if (len1 != len2 || memcmp(der1, der2, len1) != 0) {
+        OPENSSL_free(der1);
+        OPENSSL_free(der2);
+        return false;
+    }
+
+    OPENSSL_free(der1);
+    OPENSSL_free(der2);
+
+    return true;
+}
+
+
+bool compare_x509_cert_with_pem(X509* received_cert, const std::string& stored_pem_str) {
+    if (!received_cert) {
+        return false;
+    }
+
+    // Convert PEM string to X509* structure
+    BIO* bio = BIO_new_mem_buf(stored_pem_str.c_str(), -1);
+    if (!bio) {
+        return false;
+    }
+
+    X509* stored_cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+    BIO_free(bio);  // Free the BIO object
+    if (!stored_cert) {
+        return false;
+    }
+
+    // Compare the certificates
+    bool result = compare_x509_certs(received_cert, stored_cert);
+
+    // Free the stored X509 certificate
+    X509_free(stored_cert);
+
+    return result;
 }
