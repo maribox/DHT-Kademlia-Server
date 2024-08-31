@@ -45,16 +45,16 @@ def stream_output(process, prefix, lock):
                 print(f"{prefix}: {line.decode('utf-8', errors='replace').strip()}")
 
 host_ip = get_local_ip()
-base_module_port = 7400
-base_p2p_port = 7401
-n_peers = 3
+base_module_port = 7401
+base_p2p_port = 7402
+n_peers = 0
 program_path = "../../cmake-build-debug/dht_server"
 
 # Create a lock to ensure only one process prints at a time
 print_lock = threading.Lock()
 
-first_start_command = start_dht_server_command(program_path, 0)
-start(first_start_command, 0)
+#first_start_command = start_dht_server_command(program_path, 0)
+#start(first_start_command, 0)
 time.sleep(1)
 
 for i in range(1, n_peers):
@@ -62,9 +62,39 @@ for i in range(1, n_peers):
     process = start(start_command, i)
     time.sleep(0.2)
 
+
+print("----------------")
 s = dht_client.get_socket(host_ip, base_module_port)
 print("[+] Custom operation: Connected to server")
 dht_client.send_put(s, dht_client.dht_key, dht_client.dht_value)
+s = dht_client.get_socket(host_ip, base_module_port)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
+dht_client.send_get(s, dht_client.dht_key)
 dht_client.send_get(s, dht_client.dht_key)
 response = dht_client.send_get(s, dht_client.dht_key)
 print(f"Get function {'successfully got' if response else 'did not get'} a valid response")

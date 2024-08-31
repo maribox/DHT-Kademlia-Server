@@ -6,8 +6,6 @@
 
 // #include <print>
 
-const size_t K = 20;
-const size_t ALPHA = 3;
 
 //TODO: Is this enough?
 bool operator==(const Node& lhs, const Node& rhs) {
@@ -62,6 +60,13 @@ const std::list<Node>& KBucket::get_peers() const {
 
 const std::list<Node>& KBucket::get_replacement_cache() const{
     return replacement_cache;
+}
+
+size_t RoutingTable::count() {
+    return std::accumulate(bucket_list.begin(), bucket_list.end(), 0,
+        [](size_t sum, const KBucket& bucket) {
+           return sum + bucket.get_peers().size();
+        });
 }
 
 bool RoutingTable::contains(const Node &node) {
@@ -233,13 +238,45 @@ const std::vector<KBucket>& RoutingTable::get_bucket_list() const {
     return this->bucket_list;
 }
 
-NodeID generate_random_nodeID() {
+NodeID generate_random_nodeID(NodeID nodeID1, NodeID nodeID2) { // weirdest function I've ever written
+    if (nodeID1 > nodeID2) {
+        return {};
+    }
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(0, 255);
-    NodeID nodeId;
-    for (size_t i = 0; i < nodeId.size(); ++i) {
-        nodeId[i] = dis(gen);
+    NodeID generated_id;
+    for (size_t i = 0; i < generated_id.size(); ++i) {
+        std::uniform_int_distribution<unsigned int> dis(nodeID1[i], nodeID2[i]);
+        generated_id[i] = dis(gen);
+        if (nodeID1[i] != nodeID2[i]) {
+            std::uniform_int_distribution<unsigned int> dis(0, 255);
+
+            if (generated_id[i] == nodeID1[i]) { // hit lower bound
+                for (int j = i + 1; j < generated_id.size(); j++) {
+                    do {
+                        generated_id[j] = dis(gen);
+                    } while (generated_id[j] < nodeID1[j]);
+                    if (generated_id[j] > nodeID1[j]) {
+                        i = j;
+                        break;
+                    }
+                }
+            } else if (generated_id[i] == nodeID2[i]) { // hit higher bound
+                for (int j = i + 1; j < generated_id.size(); j++) {
+                    do {
+                        generated_id[j] = dis(gen);
+                    } while (generated_id[j] > nodeID2[j]);
+                    if (generated_id[j] < nodeID2[j]) {
+                        i = j;
+                        break;
+                    }
+                }
+            } // hit no bounds -> rest can be filled with completely random values
+            for (int j = i + 1; j < generated_id.size(); j++) {
+                generated_id[j] = dis(gen);
+            }
+            break;
+        }
     }
-    return nodeId;
+    return generated_id;
 }

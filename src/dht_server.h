@@ -31,9 +31,8 @@ using socket_t  = int;
 enum ProcessingStatus{
     WAIT_FOR_COMPLETE_MESSAGE_HEADER = 0,
     WAIT_FOR_COMPLETE_MESSAGE_BODY = 1,
-    PROCESSED_AND_OPEN = 1<<1,
-    PROCESSED_AND_CLOSE = 1<<2,
-    //WAIT_FOR_RELAY_SEND = 1<<2,
+    PROCESSED = 1<<1,
+    MORE_TO_READ = 1<<2,
     //WAIT_FOR_RELAY_ANSWER = 1<<3,
     ERROR = 1<<4
 };
@@ -61,21 +60,21 @@ enum class ConnectionType {
     MODULE_API = 0, P2P
 };
 
-enum class ConnectionRole { 
+enum class ConnectionRole {
     SERVER = 0, CLIENT
 };
 
 struct ConnectionInfo{
-        ConnectionType connection_type;
-        ConnectionRole role;
-        in6_addr client_addr;
-        u_short client_port; // port in host byte order
-        SSL* ssl;
-        SSLStatus ssl_stat;
-        Key rpc_id;
-        Message receive_bytes;
-        Message send_bytes;
-        };
+    ConnectionType connection_type;
+    ConnectionRole role;
+    in6_addr client_addr;
+    u_short client_port; // port in host byte order
+    SSL* ssl;
+    SSLStatus ssl_stat;
+    Key rpc_id;
+    Message receive_bytes;
+    Message send_bytes;
+    };
 
 enum ModuleApiType {
     DHT_PUT = 650,
@@ -96,10 +95,9 @@ enum P2PType {
     DHT_ERROR = 680
 };
 
-enum ErrorType {
+enum ErrorType: u_short {
     DHT_BAD_REQUEST = 10,
     DHT_NOT_FOUND = 11,
-    DHT_NOT_ACCEPTABLE = 12,
     DHT_SERVER_ERROR = 20,
 };
 
@@ -124,7 +122,11 @@ void build_DHT_header(Message& message, size_t message_size, u_short message_typ
 void write_body(Message& message, size_t body_offset, const unsigned char* data, size_t data_size);
 void read_body(const Message& message, size_t body_offset, unsigned char* data, size_t data_size);
 
-bool forge_DHT_message(socket_t socketfd, Message &message, int epollfd = -1);
+bool forge_DHT_message(socket_t socketfd, const Message &message, int epollfd = -1);
+
+std::vector<Node> blocking_node_lookup(Key &key, size_t number_of_nodes = K);
+void crawl_blocking_and_store(Key &key, Value &value, int time_to_live, int replication);
+void crawl_blocking_and_return(Key &key, socket_t socket);
 
 bool forge_DHT_put(socket_t socket, Key& key, Value& value);
 bool handle_DHT_put(socket_t socket, u_short body_size);
@@ -143,7 +145,7 @@ bool handle_DHT_RPC_ping(socket_t socket, u_short body_size);
 bool forge_DHT_RPC_ping_reply(socket_t socket, Key rpc_id);
 bool handle_DHT_RPC_ping_reply(socket_t socket, u_short body_size);
 
-bool forge_DHT_RPC_store(socket_t socket, u_short time_to_live, int replication, Key& key, Value& value);
+bool forge_DHT_RPC_store(socket_t socket, u_short time_to_live, Key& key, Value& value);
 bool handle_DHT_RPC_store(socket_t socket, u_short body_size);
 bool forge_DHT_RPC_store_reply(socket_t socket, Key rpc_id, Key& key, Value& value);
 bool handle_DHT_RPC_store_reply(socket_t socket, u_short body_size);
@@ -174,6 +176,9 @@ socket_t setup_server_socket(u_short port);
 socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_short port, const ConnectionType connection_type);
 int setup_epollin(int epollfd, socket_t serversocket);
 
+void remove_client(auto epollfd, int curfd);
+
+bool read_EPOLLIN(epoll_event current_event);
 bool handle_EPOLLIN(int epollfd, epoll_event current_event);
 
 int parse_commandline_args(int argc, const char* argv[]);

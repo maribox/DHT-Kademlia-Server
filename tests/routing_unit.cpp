@@ -2,6 +2,7 @@
   #define TESTING
 #endif
 
+#include <iostream>
 #include <catch2/catch_test_macros.hpp>
 
 #include "../src/routing.h"
@@ -117,5 +118,52 @@ TEST_CASE("RoutingTable", "[routing]") {
 }
 
 
+TEST_CASE( "generate_random_nodeID", "[routing]") { // this test was very flaky during development, hence the high number of repetitions
+    for (int j = 0; j < 200; j++) {
+        REQUIRE_NOTHROW(generate_random_nodeID());
+        auto nodeID = generate_random_nodeID();
+        REQUIRE(generate_random_nodeID(nodeID, NodeID{}) == NodeID{});
+        NodeID nodeID_with_ones{};
+        nodeID_with_ones.fill(0x01);
+
+        NodeID nodeID_with_one_zero{};
+        nodeID_with_one_zero.fill(0x01);
+        nodeID_with_one_zero[1] = 0x0;
+
+        auto generated_nodeID = generate_random_nodeID(nodeID_with_one_zero, nodeID_with_ones);
+        REQUIRE(generated_nodeID <= nodeID_with_ones);
+        REQUIRE(generated_nodeID >= nodeID_with_one_zero);
 
 
+        NodeID nodeID_with_one_five{};
+        nodeID_with_one_five.fill(0x01);
+        nodeID_with_one_five[1] = 0x5;
+
+        generated_nodeID = generate_random_nodeID(nodeID_with_one_zero, nodeID_with_one_five);
+        REQUIRE(generated_nodeID <= nodeID_with_one_five);
+        REQUIRE(generated_nodeID >= nodeID_with_one_zero);
+
+        NodeID nodeID_with_five_one{};
+        nodeID_with_five_one.fill(0x01);
+        nodeID_with_five_one[0] = 0x5;
+        nodeID_with_five_one[1] = 0x1;
+
+        generated_nodeID = generate_random_nodeID(nodeID_with_one_zero, nodeID_with_five_one);
+        REQUIRE(generated_nodeID <= nodeID_with_five_one);
+        REQUIRE(generated_nodeID >= nodeID_with_one_zero);
+        for (int i = 0 ; i<50; i++) {
+
+            //std::cout << i << std::endl;
+            NodeID nodeID_with_50{};
+            nodeID_with_50.fill(0x32);
+
+            NodeID nodeID_with_200{};
+            nodeID_with_200.fill(0xc8);
+            nodeID_with_200[0] = 0x0;
+
+            generated_nodeID = generate_random_nodeID(nodeID_with_200, nodeID_with_50);
+            REQUIRE(generated_nodeID <= nodeID_with_50);
+            REQUIRE(generated_nodeID >= nodeID_with_200);
+        }
+    }
+}

@@ -34,7 +34,13 @@ class KBucket {
     const std::list<Node>& get_replacement_cache() const;
 };
 
-NodeID generate_random_nodeID();
+NodeID generate_random_nodeID(
+    NodeID nodeID1 = NodeID{},
+    NodeID nodeID2 = [] {
+        NodeID id;
+        id.fill(0xFF);
+        return id;
+    }());
 
 class RoutingTable {
    private:
@@ -45,6 +51,7 @@ class RoutingTable {
     void add_peer(const Node& peer);
     void split_bucket();
 
+    size_t count();
     bool contains(const Node &node);
     size_t get_bucket_for(NodeID key);
 
