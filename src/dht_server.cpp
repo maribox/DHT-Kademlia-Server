@@ -334,7 +334,7 @@ bool flush_read_connInfo_with_SSL(ConnectionInfo &connection_info, const int epo
         if(bytes_flushed > 0){
             //Append bytes to recvbuf
             recvbuf.insert(std::end(recvbuf),std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
-            recvbuf.erase(std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
+            temp_buffer.erase(std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
         } else if (bytes_flushed == 0){
             // Connection was closed by the peer
             tear_down_connection(epollfd, socketfd);
@@ -1412,22 +1412,169 @@ void accept_new_connection(int epollfd, const epoll_event &cur_event, Connection
     connection_map.insert_or_assign(socketfd, connection_info);
 }
 
+//Return value bool: are we in an up and running ssl connection
+//Return value bool &socket_still_up; Is the socket still up and running aka we didnt tear connection down
+bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &connection_info, bool &socket_still_up){
+    if(connection_info.role == ConnectionRole::SERVER){
+        auto [is_socket_still_up, everything_was_sent] = std::make_tuple(true, false);
+        switch (connection_info.ssl_stat)
+        {
+            //Server still needs to finish SSL handshake for the next few cases:
 
-bool handle_EPOLLOUT(int epollfd, socket_t notifying_socket){
-    if (!connection_map.contains(notifying_socket)) {
+            case SSLStatus::HANDSHAKE_SERVER_WRITE_CERT:
+                //length prefixed ssl certificate is buffered since accept_new_connection. Simply flush it    
+                std::tie(is_socket_still_up, everything_was_sent) = flush_sendbuf(socketfd,connection_info,epollfd);
+                socket_still_up = is_socket_still_up;
+                if(!is_socket_still_up){
+                    //Connection got torn down due to error(s) on certificate transmission. Abort accepting.
+                    return false;
+                }
+                if(everything_was_sent){
+                    connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
+                    if(connection_info.ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
+                        tear_down_connection(epollfd,socketfd);
+                        socket_still_up = false;
+                        return false;
+                    }
+                    //We retried ssl_accept, but this time we guaranteed progressed ssl_stat to at least AWAITING_ACCEPT
+                    return true;
+                }
+                return true;
+            case SSLStatus::AWAITING_ACCEPT:
+                connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
+                return true;
+            case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
+                tear_down_connection(epollfd,socketfd);
+                return false;
+
+            //Server as already finished handshake (SSLStatus::ACCEPTED)->
+            default:
+                break;
+        }
+        //If we exit out of the switch (i.e. without returning), our event occured on a perfectly fine SSL-using connection.
+        //Skip after the next large else case to proceed with normal socket input handeling. :)
+    }
+    else{
+        bool is_socket_still_up{};
+        switch (connection_info.ssl_stat)
+        {
+            //Client still needs to finish SSL handshake for the next few cases
+
+            case SSLStatus::HANDSHAKE_CLIENT_READ_CERT:
+                //length prefixed ssl certificate is buffered on serverside since accept_new_connection. Simply read flush it    
+                is_socket_still_up = flush_recvbuf(socketfd,connection_info,epollfd);
+                if(!is_socket_still_up){
+                    //Connection got torn down due to error(s) on certificate reception. Abort connecting.
+                    return false;
+                }
+                //TODO: Perform heavy lifting (certificate validation, persistent storage)
+                return true;
+            case SSLStatus::AWAITING_CONNECT:
+                connection_info.ssl_stat = SSLUtils::try_ssl_connect(connection_info.ssl);
+                return true;
+            case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
+                tear_down_connection(epollfd,socketfd);
+                return false;
+            //Client as already finished handshake (SSLStatus::CONNECTED)->
+            default:
+                break;
+        }
+    }
+    socket_still_up = true;
+    return true; //valid ssl connecton
+}
+
+
+
+
+bool handle_EPOLLOUT(int epollfd, const epoll_event &current_event){
+    //Check connection type
+    socket_t socketfd = current_event.data.fd;
+    if (!connection_map.contains(socketfd)) {
+        //Should never happen.
+        tear_down_connection(main_epollfd, socketfd);
         return false;
     }
-    ConnectionInfo connection_info = connection_map.at(notifying_socket);
-    if(connection_info.send_bytes.empty()){
-        epoll_event event{};
-        event.events = EPOLLIN;
-        event.data.fd = notifying_socket;
-        epoll_ctl(epollfd, EPOLL_CTL_MOD, notifying_socket, &event);
-        return true;
+
+    ConnectionInfo &connection_info = connection_map.at(socketfd);
+
+    if(connection_info.connection_type == ConnectionType::MODULE_API){
+        //TODO: loop read into recv buf.
+
+        return true; //Return early to distinguish from following ConnectionType::P2P
     }
 
-    //TODO:
-    return true;
+    if(connection_info.role == ConnectionRole::SERVER){
+        
+        auto [is_socket_still_up, everything_was_sent] = std::make_tuple(true, false);
+        switch (connection_info.ssl_stat)
+        {
+            //Server still needs to finish SSL handshake for the next few cases:
+
+
+            case SSLStatus::HANDSHAKE_SERVER_WRITE_CERT:
+                //length prefixed ssl certificate is buffered since accept_new_connection. Simply flush it    
+                std::tie(is_socket_still_up, everything_was_sent) = flush_sendbuf(socketfd,connection_info,epollfd);
+                if(!is_socket_still_up){
+                    //Connection got torn down due to error(s) on certificate transmission. Abort accepting.
+                    return false;
+                }
+                if(everything_was_sent){
+                    connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
+                    if(connection_info.ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
+                        tear_down_connection(epollfd,socketfd);
+                        return false;
+                    }
+                    //We retried ssl_accept, but this time we guaranteed progressed ssl_stat to at least AWAITING_ACCEPT
+                    return true;
+                }
+                return true;
+            case SSLStatus::AWAITING_ACCEPT:
+                connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
+                return true;
+            case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
+                tear_down_connection(epollfd,socketfd);
+                return false;
+
+            //Server as already finished handshake (SSLStatus::ACCEPTED)->
+            default:
+                break;
+        }
+        //If we exit out of the switch (i.e. without returning), our event occured on a perfectly fine SSL-using connection.
+        //Skip after the next large else case to proceed with the usual ssl socket input handeling. :)
+    }
+    else{
+        bool is_socket_still_up{};
+        switch (connection_info.ssl_stat)
+        {
+            //Client still needs to finish SSL handshake for the next few cases
+
+            case SSLStatus::HANDSHAKE_CLIENT_READ_CERT:
+                //length prefixed ssl certificate is buffered on serverside since accept_new_connection. Simply read flush it    
+                is_socket_still_up = flush_recvbuf(socketfd,connection_info,epollfd);
+                if(!is_socket_still_up){
+                    //Connection got torn down due to error(s) on certificate reception. Abort connecting.
+                    return false;
+                }
+                //TODO: Perform heavy lifting (certificate validation, persistent storage)
+                return true;
+            case SSLStatus::AWAITING_CONNECT:
+                connection_info.ssl_stat = SSLUtils::try_ssl_connect(connection_info.ssl);
+                return true;
+            case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
+                tear_down_connection(epollfd,socketfd);
+                return false;
+            //Client as already finished handshake (SSLStatus::CONNECTED)->
+            default:
+                break;
+        }
+
+    }
+
+
+
+
+    
 }
 
 void remove_client(int epollfd, int curfd) {
@@ -1506,7 +1653,6 @@ bool read_EPOLLIN(int epollfd, const epoll_event& current_event){
                     //Connection got torn down due to error(s) on certificate reception. Abort connecting.
                     return false;
                 }
-
                 //TODO: Perform heavy lifting (certificate validation, persistent storage)
                 return true;
             case SSLStatus::AWAITING_CONNECT:
@@ -2108,12 +2254,9 @@ int main(int argc, char const *argv[])
                 }
                 // handle client processing of existing sessions
                 if (current_event.events & EPOLLIN)
-                    if (!handle_EPOLLIN(main_epollfd, current_event)) {
-                        remove_client(main_epollfd, current_event.data.fd);
-                        break;
-                    }
-                if  (current_event.events & EPOLLOUT)
-                    socket_still_valid = handle_EPOLLOUT(main_epollfd,current_event.data.fd);
+                    socket_still_valid = handle_EPOLLIN(main_epollfd,current_event);
+                if (socket_still_valid && current_event.events & EPOLLOUT)
+                    socket_still_valid = handle_EPOLLOUT(main_epollfd,current_event);
                 if (socket_still_valid && current_event.events & EPOLLERR){
                     tear_down_connection(main_epollfd,current_event.data.fd);
                     remove_client(main_epollfd, current_event.data.fd);

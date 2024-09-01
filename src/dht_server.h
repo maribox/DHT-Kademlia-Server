@@ -176,9 +176,7 @@ socket_t setup_server_socket(u_short port);
 socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t port, const ConnectionType connection_type);
 int setup_epollin(int epollfd, socket_t serversocket);
 
-void remove_client(auto epollfd, int curfd);
-
-bool read_EPOLLIN(int epollfd, const epoll_event& current_event);
-bool handle_EPOLLIN(int epollfd, const epoll_event& current_event);
+bool handle_EPOLLIN(int epollfd, const epoll_event &current_event);
+bool handle_EPOLLOUT(int epollfd, const epoll_event &current_event);
 
 int parse_commandline_args(int argc, const char* argv[]);
