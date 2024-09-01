@@ -373,7 +373,6 @@ bool flush_read_connInfo_without_SSL(ConnectionInfo &connection_info, const int 
                 // We should try reading later
                 return true; // Socket is still up
             }else{
-                std::cout << strerror(errno) << std::endl;
                 // An error occurred, tear down the connection
                 tear_down_connection(epollfd, socketfd);
                 return false; // Socket is down
@@ -1412,9 +1411,8 @@ void accept_new_connection(int epollfd, const epoll_event &cur_event, Connection
     connection_map.insert_or_assign(socketfd, connection_info);
 }
 
-//Return value bool: are we in an up and running ssl connection
-//Return value bool &socket_still_up; Is the socket still up and running aka we didnt tear connection down
-bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &connection_info, bool &socket_still_up){
+//Return value bool: socket_still_up
+bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &connection_info){
     if(connection_info.role == ConnectionRole::SERVER){
         auto [is_socket_still_up, everything_was_sent] = std::make_tuple(true, false);
         switch (connection_info.ssl_stat)
@@ -1424,7 +1422,6 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
             case SSLStatus::HANDSHAKE_SERVER_WRITE_CERT:
                 //length prefixed ssl certificate is buffered since accept_new_connection. Simply flush it    
                 std::tie(is_socket_still_up, everything_was_sent) = flush_sendbuf(socketfd,connection_info,epollfd);
-                socket_still_up = is_socket_still_up;
                 if(!is_socket_still_up){
                     //Connection got torn down due to error(s) on certificate transmission. Abort accepting.
                     return false;
@@ -1433,7 +1430,6 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
                     connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
                     if(connection_info.ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
                         tear_down_connection(epollfd,socketfd);
-                        socket_still_up = false;
                         return false;
                     }
                     //We retried ssl_accept, but this time we guaranteed progressed ssl_stat to at least AWAITING_ACCEPT
@@ -1480,7 +1476,6 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
                 break;
         }
     }
-    socket_still_up = true;
     return true; //valid ssl connecton
 }
 
@@ -1504,77 +1499,17 @@ bool handle_EPOLLOUT(int epollfd, const epoll_event &current_event){
         return true; //Return early to distinguish from following ConnectionType::P2P
     }
 
-    if(connection_info.role == ConnectionRole::SERVER){
-        
-        auto [is_socket_still_up, everything_was_sent] = std::make_tuple(true, false);
-        switch (connection_info.ssl_stat)
-        {
-            //Server still needs to finish SSL handshake for the next few cases:
+    
 
-
-            case SSLStatus::HANDSHAKE_SERVER_WRITE_CERT:
-                //length prefixed ssl certificate is buffered since accept_new_connection. Simply flush it    
-                std::tie(is_socket_still_up, everything_was_sent) = flush_sendbuf(socketfd,connection_info,epollfd);
-                if(!is_socket_still_up){
-                    //Connection got torn down due to error(s) on certificate transmission. Abort accepting.
-                    return false;
-                }
-                if(everything_was_sent){
-                    connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
-                    if(connection_info.ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
-                        tear_down_connection(epollfd,socketfd);
-                        return false;
-                    }
-                    //We retried ssl_accept, but this time we guaranteed progressed ssl_stat to at least AWAITING_ACCEPT
-                    return true;
-                }
-                return true;
-            case SSLStatus::AWAITING_ACCEPT:
-                connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
-                return true;
-            case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
-                tear_down_connection(epollfd,socketfd);
-                return false;
-
-            //Server as already finished handshake (SSLStatus::ACCEPTED)->
-            default:
-                break;
-        }
-        //If we exit out of the switch (i.e. without returning), our event occured on a perfectly fine SSL-using connection.
-        //Skip after the next large else case to proceed with the usual ssl socket input handeling. :)
-    }
-    else{
-        bool is_socket_still_up{};
-        switch (connection_info.ssl_stat)
-        {
-            //Client still needs to finish SSL handshake for the next few cases
-
-            case SSLStatus::HANDSHAKE_CLIENT_READ_CERT:
-                //length prefixed ssl certificate is buffered on serverside since accept_new_connection. Simply read flush it    
-                is_socket_still_up = flush_recvbuf(socketfd,connection_info,epollfd);
-                if(!is_socket_still_up){
-                    //Connection got torn down due to error(s) on certificate reception. Abort connecting.
-                    return false;
-                }
-                //TODO: Perform heavy lifting (certificate validation, persistent storage)
-                return true;
-            case SSLStatus::AWAITING_CONNECT:
-                connection_info.ssl_stat = SSLUtils::try_ssl_connect(connection_info.ssl);
-                return true;
-            case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
-                tear_down_connection(epollfd,socketfd);
-                return false;
-            //Client as already finished handshake (SSLStatus::CONNECTED)->
-            default:
-                break;
-        }
-
+    if(!handle_custom_ssl_protocol(epollfd,socketfd,connection_info)){
+        return false;
     }
 
 
+    //flush buffer.
+    auto [socket_still_up, _ ]  = flush_sendbuf(socketfd,connection_info,epollfd);
+    return socket_still_up;
 
-
-    return true;
 }
 
 void remove_client(int epollfd, int curfd) {
@@ -1601,73 +1536,11 @@ bool read_EPOLLIN(int epollfd, const epoll_event& current_event){
     //Two large switches:
     //First: Event on the Server part of an SSL connection: Acts adhearing to protocol, and progresses SSLState. Final Goal: ACCEPTED.
     //
-    if(connection_info.role == ConnectionRole::SERVER){
-
-        auto [is_socket_still_up, everything_was_sent] = std::make_tuple(true, false);
-        switch (connection_info.ssl_stat)
-        {
-            //Server still needs to finish SSL handshake for the next few cases:
-
-
-            case SSLStatus::HANDSHAKE_SERVER_WRITE_CERT:
-                //length prefixed ssl certificate is buffered since accept_new_connection. Simply flush it
-                std::tie(is_socket_still_up, everything_was_sent) = flush_sendbuf(socketfd,connection_info,epollfd);
-                if(!is_socket_still_up){
-                    //Connection got torn down due to error(s) on certificate transmission. Abort accepting.
-                    return false;
-                }
-                if(everything_was_sent){
-                    connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
-                    if(connection_info.ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
-                        tear_down_connection(epollfd,socketfd);
-                        return false;
-                    }
-                    //We retried ssl_accept, but this time we guaranteed progressed ssl_stat to at least AWAITING_ACCEPT
-                    return true;
-                }
-                return true;
-            case SSLStatus::AWAITING_ACCEPT:
-                connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
-                return true;
-            case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
-                tear_down_connection(epollfd,socketfd);
-                return false;
-
-            //Server as already finished handshake (SSLStatus::ACCEPTED)->
-            default:
-                break;
-        }
-        //If we exit out of the switch (i.e. without returning), our event occured on a perfectly fine SSL-using connection.
-        //Skip after the next large else case to proceed with normal socket input handeling. :)
-    }
-    else{
-        bool is_socket_still_up{};
-        switch (connection_info.ssl_stat)
-        {
-            //Client still needs to finish SSL handshake for the next few cases
-
-            case SSLStatus::HANDSHAKE_CLIENT_READ_CERT:
-                //length prefixed ssl certificate is buffered on serverside since accept_new_connection. Simply read flush it
-                is_socket_still_up = flush_recvbuf(socketfd,connection_info,epollfd);
-                if(!is_socket_still_up){
-                    //Connection got torn down due to error(s) on certificate reception. Abort connecting.
-                    return false;
-                }
-                //TODO: Perform heavy lifting (certificate validation, persistent storage)
-                return true;
-            case SSLStatus::AWAITING_CONNECT:
-                connection_info.ssl_stat = SSLUtils::try_ssl_connect(connection_info.ssl);
-                return true;
-            case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
-                tear_down_connection(epollfd,socketfd);
-                return false;
-            //Client as already finished handshake (SSLStatus::CONNECTED)->
-            default:
-                break;
-        }
-
+    if(!handle_custom_ssl_protocol(epollfd,socketfd,connection_info)){
+        return false; //Socket was torn down by us.
     }
 
+    std::cout << "Received new request." << std::endl;
     std::array<unsigned char, 4096> recv_buf{};
     ssize_t total_bytes_read = 0;
 
@@ -1952,7 +1825,6 @@ void prepare_SSL_Config(in_port_t host_p2p_port){
     BIO *bio = BIO_new(BIO_s_mem());
     PEM_write_bio_X509(bio, SSLConfig::cert);
     int cert_len = BIO_pending(bio);
-    SSLConfig::cert_len = cert_len;
     uint32_t net_length = htonl(cert_len);  // Convert length to network byte order
 
     //Allocate [<lengthprefix><certificate>] bytes.    [ ] <-- describes the extent of malloc.
@@ -2145,7 +2017,7 @@ int main(int argc, char const *argv[])
 
             if (host_module_port == host_p2p_port) {
                 std::cerr << "Cannot setup Module API server and P2P server on the same port (" << host_module_port << "). Exiting." << std::endl;
-                return 1;
+                return -1;
             }
             std::cout << "Modules reach this server on " << host_address_string << ":" << host_module_port << std::endl;
             std::cout << "We communicate with peers on " << host_address_string << ":" << host_p2p_port << std::endl;
@@ -2220,7 +2092,7 @@ int main(int argc, char const *argv[])
 
     if(should_connect_to_network) {
         if (!connect_to_network(peer_port, peer_address_string, peer_address)) {
-            return 1;
+            return -1;
         }
     }
 
