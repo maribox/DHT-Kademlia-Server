@@ -27,7 +27,7 @@ find_package(Boost REQUIRED COMPONENTS program_options)
 find_package(OpenSSL REQUIRED)
 
 add_executable(dht_server ${SOURCE_DIR}/dht_server.cpp ${SOURCE_DIR}/routing.cpp
-        ${SOURCE_DIR}/common_types.h ${SOURCE_DIR}/ssl.cpp ${SOURCE_DIR}/ssl.h)
+${SOURCE_DIR}/common_types.h ${SOURCE_DIR}/ssl.cpp)
 add_executable(testing ${TEST_DIR}/storage_unit.cpp)
 add_executable(routing_tests ${TEST_DIR}/routing_unit.cpp ${SOURCE_DIR}/routing.cpp ${SOURCE_DIR}/dht_server.cpp)
 add_executable(tls_server ${SOURCE_DIR}/tls_server.cpp)
@@ -35,8 +35,9 @@ add_executable(tls_server ${SOURCE_DIR}/tls_server.cpp)
 # shouldn't be necessary, but somehow doesn't work when removed
 target_compile_definitions(routing_tests PRIVATE TESTING)
 
-target_include_directories(dht_server PRIVATE ${Boost_INCLUDE_DIRS})
+target_include_directories(dht_server PRIVATE ${Boost_INCLUDE_DIRS} ${OPENSSL_INCLUDE_DIR})
 target_include_directories(tls_server PRIVATE ${OPENSSL_INCLUDE_DIR})
+
 
 target_compile_options(dht_server PRIVATE -g -no-pie)
 target_compile_definitions(dht_server PRIVATE BOOST_STACKTRACE_USE_ADDR2LINE)
@@ -58,3 +59,18 @@ endif()
 catch_discover_tests(testing)
 catch_discover_tests(routing_tests)
 
+#For cleaning:
+
+# Define a custom target to clean additional files
+add_custom_target(clean-extra
+    COMMAND ${CMAKE_COMMAND} -E echo "Cleaning .pem and .txt files"
+    COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/*.pem
+    COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/*.txt
+    COMMENT "Removing additional files (.pem, .txt) from build directory"
+)
+
+# Define a clean-all target that runs both built-in clean and clean-extra
+add_custom_target(clean-all
+    DEPENDS clean-extra
+)
+# Now, running `cmake --build . --target clean-all` will clean everything
