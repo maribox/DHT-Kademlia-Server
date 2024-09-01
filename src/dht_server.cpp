@@ -18,6 +18,7 @@
 #include <string_view>
 #include <chrono>
 
+
 #define VERBOSE
 
 //#include "routing.cpp"
@@ -499,7 +500,7 @@ void build_RPC_header(Message& message, Key& rpc_id) {
     u_short port = routing_table.get_local_node().port;
     u_short network_order_port = htons(port);
     write_body(message, 0UL, node_id.data(), NODE_ID_SIZE);
-    write_body(message, NODE_ID_SIZE, reinterpret_cast<unsigned char*>(network_order_port), 2UL);
+    write_body(message, NODE_ID_SIZE, reinterpret_cast<unsigned char*>(&network_order_port), 2UL);
     write_body(message, NODE_ID_SIZE + 2, rpc_id.data(), RPC_ID_SIZE);
 }
 
@@ -570,28 +571,71 @@ bool check_rpc_id(const Message &message, const Key &correct_rpc_id) {
 
 // crawling
 
+void process_answer(int epollfd, P2PType expected_type, std::function<bool(socket_t, u_short)> handle_answer, int expected_responses = 1) {
+    std::vector<epoll_event> epoll_events{64};
+    while(expected_responses > 0) {
+        int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), 5000);
+        if (event_count != -1) {
+            for (int i = 0; i < event_count; i++) {
+                auto current_event = epoll_events[i];
+                if (!(current_event.events & EPOLLIN)) {
+                    continue;
+                }
+                if (!read_EPOLLIN(epollfd, current_event)) {
+                    continue;
+                }
+
+                socket_t sockfd = epoll_events[i].data.fd;
+                if (!connection_map.contains(sockfd)) {
+                    continue;
+                }
+                auto& connection_info = connection_map[sockfd];
+
+                u_short message_size = -1;
+                u_short dht_type = -1;
+
+                bool header_success = parse_header(connection_info, message_size, dht_type);
+                if (header_success && dht_type == expected_type) {
+                    if (!handle_answer(sockfd, message_size - HEADER_SIZE)) {
+                        continue;
+                    }
+
+                    expected_responses--;
+                    // potential error source when multiple responses from same source (shouldn't happen, but could)
+                    close(sockfd);
+                    connection_map.erase(sockfd);
+                }
+            }
+        } else {
+            break;
+        }
+    }
+}
+
 std::vector<Node> blocking_node_lookup(Key &key, size_t number_of_nodes) {
     std::vector<Node> closest_nodes = routing_table.find_closest_nodes(key);
     std::set<Node> returned_nodes{};
-    std::mutex returned_nodes_mutex;
     int epollfd = epoll_create1(0);
-    std::vector<epoll_event> epoll_events{64};
-    std::vector<Node> k_closest_nodes(number_of_nodes);
+    std::set<Node> previous_k_closest_nodes{};
 
 
     //std::cout << "Trying to find neighbours of a key starting with '"
     //        << std::hex << key[0] << key[1] << "'... " << std::dec << std::endl;
 
     while (true) {
-        // here, closest_nodes will be sorted by distance to key
-        bool found_difference_to_last_iteration = false;
-        for (int i = 0; i < std::min(K, closest_nodes.size()); i++) {
-            if (k_closest_nodes[i] != closest_nodes[i]) {
-                k_closest_nodes[i] = closest_nodes[i];
-                found_difference_to_last_iteration = true;
+        // TODO
+        bool found_new_nodes = false;
+
+        for (const auto& node : closest_nodes) {
+            if (!previous_k_closest_nodes.contains(node)) {
+                found_new_nodes = true;
+                previous_k_closest_nodes.insert(node);
+                if (previous_k_closest_nodes.size() >= K) {
+                    break;
+                }
             }
         }
-        if (found_difference_to_last_iteration) {
+        if (!found_new_nodes) {
             break;
         }
 
@@ -609,36 +653,20 @@ std::vector<Node> blocking_node_lookup(Key &key, size_t number_of_nodes) {
                 responses_left++;
             }
         }
-        while(responses_left > 0) {
-            int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), 5000);
-            if (event_count != -1) {
-                for (int i = 0; i < event_count; i++) {
-                    auto current_event = epoll_events[i];
-                    if (!(current_event.events & EPOLLIN)) {
-                        continue;
-                    }
-                    if (!read_EPOLLIN(current_event)) {
-                        continue;
-                    }
 
-                    socket_t sockfd = epoll_events[i].data.fd;
-                    auto& connection_info = connection_map[sockfd];
+        auto handle_answer = [&](socket_t sockfd, u_short message_size) {
+            return handle_DHT_RPC_find_node_reply(sockfd, message_size, &returned_nodes);
+        };
 
-                    u_short message_size = -1;
-                    u_short dht_type = -1;
+        process_answer(epollfd, P2PType::DHT_RPC_FIND_NODE_REPLY, handle_answer, responses_left);
 
-                    bool header_success = parse_header(connection_info, message_size, dht_type);
-                    if (header_success && dht_type == P2PType::DHT_RPC_FIND_NODE_REPLY) {
-                        handle_DHT_RPC_find_node_reply(sockfd, message_size - HEADER_SIZE, &returned_nodes, &returned_nodes_mutex);
-
-                        responses_left--;
-                        // potential error source when multiple responses from same source (shouldn't happen, but could)
-                        close(sockfd);
-                        connection_map.erase(sockfd);
-                    }
-                }
+        for (const auto& node : returned_nodes) { // add new nodes to closest nodes
+            if (std::ranges::find(closest_nodes, node) == closest_nodes.end()) {
+                closest_nodes.push_back(node);
             }
         }
+
+        returned_nodes.clear();
 
         std::ranges::sort(closest_nodes,
                           [key](const Node& node_1, const Node& node_2){return RoutingTable::node_distance(node_1.id, key) < RoutingTable::node_distance(node_2.id, key);}
@@ -677,6 +705,7 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
     auto k_closest_nodes = blocking_node_lookup(key);
 
     auto found_values = std::vector<Value>{};
+    int epollfd = epoll_create1(0);
     for (auto& node : k_closest_nodes) {
         if (node.port == 0) {
             continue;
@@ -684,13 +713,13 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
 
         if (node == routing_table.get_local_node()) {
             std::cout << "Trying to get key '" << key_to_string(key) << "' from own storage" << std::endl;
-            if (auto opt = get_from_storage(key)) {
-                found_values.push_back(opt.value());
+            if (const Value* value = get_from_storage(key)) {
+                found_values.push_back(*value);
             }
             continue;
         }
 
-        socket_t sockfd = setup_connect_socket(node.addr, node.port, {ConnectionType::P2P});
+        socket_t sockfd = setup_connect_socket(epollfd, node.addr, node.port, {ConnectionType::P2P});
         if (sockfd != -1) {
             forge_DHT_RPC_find_value(sockfd, key);
         }
@@ -756,50 +785,6 @@ bool handle_DHT_put(socket_t socket, u_short body_size) {
 
 bool forge_DHT_get(socket_t socket, Key &key) {
     return true;
-}
-
-void crawl_blocking_and_return(Key &key, socket_t socket) {
-    auto k_closest_nodes = blocking_node_lookup(key);
-
-    auto found_values = std::vector<Value*>{};
-    for (auto& node : k_closest_nodes) {
-        if (node.port == 0) {
-            continue;
-        }
-
-        if (node == routing_table.get_local_node()) {
-            std::cout << "Trying to get key '" << key_to_string(key) << "' from own storage" << std::endl;
-            auto value = get_from_storage(key);
-            if (value) {
-                found_values.push_back(value);
-            }
-            continue;
-        }
-
-        socket_t sockfd = -1;
-        /* Commented out for compilation. setup_connect_socket now needs an epoll instance...
-        *socket_t sockfd = setup_connect_socket(node.addr, node.port, ConnectionType::P2P);
-        */
-        if (sockfd != -1) {
-            forge_DHT_RPC_find_value(sockfd, key);
-        }
-    }
-
-    std::map<Value, int> frequency;
-    for (auto& value : found_values) {
-        frequency[*value]++;
-    }
-
-    if (found_values.size() > 0) {
-        //TODO: Was changed to auto& but yielded error. Reinvestigate
-        auto most_frequent_element = std::max_element(frequency.begin(), frequency.end(),
-                                  [](const std::pair<Value, int>& a, const std::pair<Value, int>& b) {
-                                      return a.second < b.second;
-                                  })->first;
-        forge_DHT_success(socket, key, most_frequent_element);
-    } else {
-        forge_DHT_failure(socket, key);
-    }
 }
 
 bool handle_DHT_get(socket_t socket, u_short body_size) {
@@ -1167,7 +1152,7 @@ bool handle_DHT_error(const socket_t socket, const u_short body_size) {
     if (body_size != 2) {
         return false;
     }
-    const Message &message = connection_map[socket].received_bytes;
+    const Message &message = connection_map[socket].receive_bytes;
 
     u_short error_type = 0;
     read_body(message, 0, reinterpret_cast<unsigned char *>(error_type), 2);
@@ -1447,7 +1432,7 @@ bool handle_EPOLLOUT(int epollfd, socket_t notifying_socket){
     }
 
     //TODO:
-
+    return true;
 }
 
 void remove_client(int epollfd, int curfd) {
@@ -1456,8 +1441,7 @@ void remove_client(int epollfd, int curfd) {
     connection_map.erase(curfd);
 }
 
-bool read_EPOLLIN(epoll_event current_event) {
-bool handle_EPOLLIN(int epollfd, epoll_event current_event){
+bool read_EPOLLIN(int epollfd, const epoll_event& current_event){
     socket_t socketfd = current_event.data.fd;
     if (!connection_map.contains(socketfd)) {
         //Should never happen.
@@ -1576,9 +1560,9 @@ bool handle_EPOLLIN(int epollfd, epoll_event current_event){
     }
 }
 
-bool handle_EPOLLIN(int epollfd, epoll_event current_event) { // returns whether the socket is still valid and should be kept open
+bool handle_EPOLLIN(int epollfd, const epoll_event& current_event) { // returns whether the socket is still valid and should be kept open
     std::cout << "Received new request." << std::endl;
-    if (!read_EPOLLIN(current_event)) {
+    if (!read_EPOLLIN(epollfd, current_event)) {
         return false;
     }
     ProcessingStatus processing_status;
@@ -1877,11 +1861,11 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
     // 6. For Nodes farther away, do "refreshing" of random NodeID's in the respective ranges
     //    (choose closest nodes and send them find_node rpcs with the randomly generated NodeID's in said range)
 
+    int epollfd = epoll_create1(0);
+    socket_t peer_socket = setup_connect_socket(epollfd, peer_address, peer_port, {ConnectionType::P2P});
+    epollfd = setup_epollin(epollfd, peer_socket);
 
-    socket_t peer_socket = setup_connect_socket(peer_address, peer_port, {ConnectionType::P2P});
-    int epollfd = setup_epollin(epoll_create1(0), peer_socket);
-
-    if (peer_socket == -1) {
+    if (peer_socket == -1 || epollfd == -1) {
         std::cerr << "Error creating socket. Aborting." << std::endl;
         return false;
     }
@@ -1895,7 +1879,7 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
     if (event_count != -1) {
         for (int i = 0; i < event_count; i++) {
             if (epoll_events[i].events & EPOLLIN) {
-                if (!read_EPOLLIN(epoll_events[i])) {
+                if (!read_EPOLLIN(epollfd, epoll_events[i])) {
                     std::cerr << "Didn't receive response during bootstrap from " << peer_address_string << ":" << peer_port << std::endl;
                     return false;
                 }
@@ -2128,7 +2112,7 @@ int main(int argc, char const *argv[])
                 }
                 // handle client processing of existing sessions
                 if (current_event.events & EPOLLIN)
-                    if (!handle_EPOLLIN(main_epollfd,current_event)) {
+                    if (!handle_EPOLLIN(main_epollfd, current_event)) {
                         remove_client(main_epollfd, current_event.data.fd);
                         break;
                     }

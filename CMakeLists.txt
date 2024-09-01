@@ -27,7 +27,7 @@ find_package(Boost REQUIRED COMPONENTS program_options)
 find_package(OpenSSL REQUIRED)
 
 add_executable(dht_server ${SOURCE_DIR}/dht_server.cpp ${SOURCE_DIR}/routing.cpp
-        src/common_types.h)
+        ${SOURCE_DIR}/common_types.h ${SOURCE_DIR}/ssl.cpp ${SOURCE_DIR}/ssl.h)
 add_executable(testing ${TEST_DIR}/storage_unit.cpp)
 add_executable(routing_tests ${TEST_DIR}/routing_unit.cpp ${SOURCE_DIR}/routing.cpp ${SOURCE_DIR}/dht_server.cpp)
 add_executable(tls_server ${SOURCE_DIR}/tls_server.cpp)
@@ -42,7 +42,7 @@ target_compile_options(dht_server PRIVATE -g -no-pie)
 target_compile_definitions(dht_server PRIVATE BOOST_STACKTRACE_USE_ADDR2LINE)
 target_compile_options(routing_tests PRIVATE -g)
 
-target_link_libraries(dht_server PRIVATE ${Boost_LIBRARIES})
+target_link_libraries(dht_server PRIVATE ${Boost_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto)
 target_link_libraries(testing PRIVATE Catch2::Catch2WithMain ${Boost_LIBRARIES})
 target_link_libraries(routing_tests PRIVATE Catch2::Catch2WithMain ${Boost_LIBRARIES})
 target_link_libraries(tls_server OpenSSL::SSL OpenSSL::Crypto)
