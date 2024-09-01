@@ -1411,6 +1411,83 @@ void accept_new_connection(int epollfd, const epoll_event &cur_event, Connection
     connection_map.insert_or_assign(socketfd, connection_info);
 }
 
+//Do heavy lifting certificate storage logic
+CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socket, ConnectionInfo &connection_info_emplaced){
+    if(connection_info_emplaced.role != ConnectionRole::CLIENT){
+        tear_down_connection(epollfd,peer_socket);
+        return CertificateStatus::ERRORED_CERTIFICATE;
+    }
+    unsigned char * foreign_cert_str = nullptr;
+    uint32_t cert_len{0};
+    bool socket_still_alive = receive_prefixed_sendbuf_in_charptr(epollfd, peer_socket, connection_info_emplaced, foreign_cert_str, cert_len);
+    
+    if(!foreign_cert_str && socket_still_alive){
+        return CertificateStatus::CERTIFICATE_NOT_FULLY_PRESENT;
+    }
+
+    if(!socket_still_alive){
+        free(foreign_cert_str);
+        return CertificateStatus::ERRORED_CERTIFICATE;
+    }
+    
+
+    X509 * foreign_certificate = SSLUtils::load_cert_from_char(foreign_cert_str,cert_len);
+    free(foreign_cert_str);
+
+
+    //Save foreign cert str
+    unsigned char received_id[KEY_SIZE];
+    if(!SSLUtils::extract_custom_id(foreign_certificate,received_id)){
+        std::cerr << "Failed to extract IPv6 from certificate." << std::endl;
+        return CertificateStatus::ERRORED_CERTIFICATE;
+    }
+
+
+    std::string hex_id = Utils::bin_to_hex(received_id, KEY_SIZE);
+    #ifdef VERBOSE
+    std::cout << "Hex ID received in certificate is:" << hex_id << std::endl;
+    #endif
+
+    std::string ipv6_str{};
+    if(!SSLUtils::extract_ipv6_from_cert(foreign_certificate,ipv6_str)){
+        std::cerr << "Failed to extract IPv6 from certificate." << std::endl;
+        return CertificateStatus::ERRORED_CERTIFICATE;
+    }
+    if (SSLConfig::cert_map.find(hex_id) != SSLConfig::cert_map.end()) {
+        std::cout << "Kademlia ID already recognized." << std::endl;
+        //TODO compare certificates
+        if(true){
+            //Compare yielded equality:
+            return CertificateStatus::EXPECTED_CERTIFICATE;
+        }else{
+            //Compare yielded difference. --> RPC_Ping old connection partner
+            //TODO: Maybe leave out because of time reasons. For now, assume that peer is not reachable
+            //return CertificateStatus::NEW_VALID_CERTIFICATE;
+        }
+    }
+    
+    // Else, meaning the certificate is new or the predecessor of the kademlia was unreachable with our saved certificate:
+    // Add the new certificate to the map
+    BIO *bio = BIO_new(BIO_s_mem());
+    PEM_write_bio_X509(bio, foreign_certificate);
+    int cert_len_to_save = BIO_pending(bio);
+    char* cert_pem = (char*)malloc(cert_len_to_save + 1);
+    BIO_read(bio, cert_pem, cert_len_to_save);
+    cert_pem[cert_len_to_save] = '\0';
+    BIO_free(bio);
+
+    SSLConfig::cert_map[hex_id] = std::pair{htons(connection_info_emplaced.client_port),std::string(cert_pem)};
+    free(cert_pem);
+
+    if (X509_STORE_add_cert(SSLConfig::client_cert_store, foreign_certificate) != 1) {
+        std::cerr << "Failed to add certificate to trusted store." << std::endl;
+        SSLConfig::cert_map.erase(hex_id);
+        return CertificateStatus::ERRORED_CERTIFICATE;
+    }
+    return CertificateStatus::NEW_VALID_CERTIFICATE;
+}
+
+
 //Return value bool: socket_still_up
 bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &connection_info){
     if(connection_info.role == ConnectionRole::SERVER){
@@ -1452,6 +1529,7 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
     }
     else{
         bool is_socket_still_up{};
+        CertificateStatus cs{};
         switch (connection_info.ssl_stat)
         {
             //Client still needs to finish SSL handshake for the next few cases
@@ -1463,7 +1541,17 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
                     //Connection got torn down due to error(s) on certificate reception. Abort connecting.
                     return false;
                 }
-                //TODO: Perform heavy lifting (certificate validation, persistent storage)
+                cs = receive_certificate_as_client(epollfd,socketfd,connection_info);
+                //Perform heavy lifting (certificate validation, persistent storage)
+                if(cs == CertificateStatus::NEW_VALID_CERTIFICATE || cs == CertificateStatus::EXPECTED_CERTIFICATE){
+                    connection_info.ssl_stat = SSLUtils::try_ssl_connect(connection_info.ssl);
+                    return true;
+                }
+                if(cs == CertificateStatus::ERRORED_CERTIFICATE || cs == CertificateStatus::KNOWN_CERTIFICATE_CONTENT_MISMATCH){
+                    tear_down_connection(epollfd,socketfd);
+                    return false;
+                }
+                //Certificate is not fully present yet. Return true, try again later.
                 return true;
             case SSLStatus::AWAITING_CONNECT:
                 connection_info.ssl_stat = SSLUtils::try_ssl_connect(connection_info.ssl);
@@ -1494,12 +1582,9 @@ bool handle_EPOLLOUT(int epollfd, const epoll_event &current_event){
     ConnectionInfo &connection_info = connection_map.at(socketfd);
 
     if(connection_info.connection_type == ConnectionType::MODULE_API){
-        //TODO: loop read into recv buf.
-
+        flush_sendbuf(socketfd,connection_info,epollfd);
         return true; //Return early to distinguish from following ConnectionType::P2P
     }
-
-    
 
     if(!handle_custom_ssl_protocol(epollfd,socketfd,connection_info)){
         return false;
@@ -1528,8 +1613,8 @@ bool read_EPOLLIN(int epollfd, const epoll_event& current_event){
     ConnectionInfo &connection_info = connection_map.at(socketfd);
 
     if(connection_info.connection_type == ConnectionType::MODULE_API){
-        //TODO: loop read into recv buf.
-
+        flush_recvbuf(socketfd,connection_info,epollfd);
+        //TODO: Notify kademlia logic.
         return true; //Return early to distinguish from following ConnectionType::P2P
     }
 
@@ -1661,7 +1746,7 @@ socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t po
     connection_info.connection_type = connection_type;
     connection_info.role = ConnectionRole::CLIENT;
     connection_info.client_addr = address;
-    connection_info.client_port = addr.sin6_port;
+    connection_info.client_port = port;
 
     if (connect(peer_socket, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == -1) {
         std::cerr << "Couldn't connect to peer." << std::endl;
@@ -1672,8 +1757,6 @@ socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t po
     std::cout << "Connected socket to " << ip_to_string(connection_info.client_addr) << ":" << connection_info.client_port << std::endl;
     #endif
 
-
-
     int flags = fcntl(peer_socket, F_GETFL, 0);
     if (!(flags & O_NONBLOCK)) {
         flags |= O_NONBLOCK;
@@ -1683,7 +1766,7 @@ socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t po
     connection_map[peer_socket] = connection_info;
     auto &connection_info_emplaced = connection_map[peer_socket];
 
-    //Inject SSL-Code.
+    //Inject SSL-Code:
     if(connection_type == ConnectionType::P2P){
         #ifdef VERBOSE
         std::cout << "Setting up SSL for outgoing client connection (we are client)" << std::endl;
@@ -1708,76 +1791,31 @@ socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t po
         std::cout << "Receiving length-prefixed Server-Certificate over insecure TCP channel" << std::endl;
         #endif
 
-
-        unsigned char * foreign_cert_str = nullptr;
-        uint32_t cert_len{0};
-        //Do heavy lifting certificate storage logic
-        bool socket_still_alive = receive_prefixed_sendbuf_in_charptr(epollfd, peer_socket, connection_info_emplaced, foreign_cert_str, cert_len);
-        if(!socket_still_alive){
+        // Do heavy lifting certificate storage logic
+        CertificateStatus cert_stat =  receive_certificate_as_client(epollfd, peer_socket, connection_info_emplaced);
+        if(cert_stat == CertificateStatus::ERRORED_CERTIFICATE || cert_stat == CertificateStatus::KNOWN_CERTIFICATE_CONTENT_MISMATCH){
+            //Abort the connection. Could be a malicious Peer! Abort, abort!
             tear_down_connection(epollfd,peer_socket);
             return -1;
         }
-        if(!foreign_cert_str){
-            return peer_socket;
+        if(cert_stat == CertificateStatus::CERTIFICATE_NOT_FULLY_PRESENT){
+            return peer_socket; //fd is valid, but wait for more bytes.
         }
 
-        X509 * foreign_certificate = SSLUtils::load_cert_from_char(foreign_cert_str,cert_len);
-        free(foreign_cert_str);
+        //Else: cert_stat is either NEW_VALID_CERTIFICATE  or EXPECTED_CERTIFICATE, continue with protocol.
+        //New certificate saved or recognized previously trusted certificate.
+        //Advance to at least SSLStatus::AWAITING_ACCEPT :)
 
-
-        //Save foreign cert str
-        unsigned char received_id[KEY_SIZE];
-        if(!SSLUtils::extract_custom_id(foreign_certificate,received_id)){
-            std::cerr << "Failed to extract IPv6 from certificate." << std::endl;
-        }
-
-
-        std::string hex_id = Utils::bin_to_hex(received_id, KEY_SIZE);
-        #ifdef VERBOSE
-        std::cout << "Hex ID received in certificate is:" << hex_id << std::endl;
-        #endif
-
-        std::string ipv6_str{};
-        if(!SSLUtils::extract_ipv6_from_cert(foreign_certificate,ipv6_str)){
-            std::cerr << "Failed to extract IPv6 from certificate." << std::endl;
-        }
-        if (SSLConfig::cert_map.find(hex_id) != SSLConfig::cert_map.end()) {
-            std::cout << "Certificate already recognized." << std::endl;
-            //TODO compare certificates
-            //Reject, if not matching and original peer is still reachable. --> RPC_Ping.
-        }
-        else{
-            // Add the new certificate to the map
-            BIO *bio = BIO_new(BIO_s_mem());
-            PEM_write_bio_X509(bio, foreign_certificate);
-            int cert_len = BIO_pending(bio);
-            char* cert_pem = (char*)malloc(cert_len + 1);
-            BIO_read(bio, cert_pem, cert_len);
-            cert_pem[cert_len] = '\0';
-            BIO_free(bio);
-
-            SSLConfig::cert_map[hex_id] = std::pair{addr.sin6_port,std::string(cert_pem)};
-            free(cert_pem);
-        }
-
-        if (X509_STORE_add_cert(SSLConfig::client_cert_store, foreign_certificate) != 1) {
-            std::cerr << "Failed to add certificate to trusted store." << std::endl;
-            // Handle error or exit as needed
-        }
-
-        SSLStatus ssl_stat = SSLUtils::try_ssl_connect(ssl);
-        connection_info_emplaced.ssl_stat = ssl_stat;
-        if (ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT) {
+        connection_info_emplaced.ssl_stat = SSLUtils::try_ssl_connect(ssl);;
+        if (connection_info_emplaced.ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT) {
             tear_down_connection(epollfd,peer_socket);
             return -1;
         }
     }
-
     return peer_socket;
 }
 
 //SSL functions:
-
 void prepare_SSL_Config(in_port_t host_p2p_port){
 
     SSLConfig::id = routing_table.get_local_node().id;

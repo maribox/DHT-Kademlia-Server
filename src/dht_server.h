@@ -28,13 +28,22 @@ using Message = std::vector<unsigned char>;
 
 using socket_t  = int;
 
+enum CertificateStatus{
+    EXPECTED_CERTIFICATE = 0,
+    NEW_VALID_CERTIFICATE,
+    CERTIFICATE_NOT_FULLY_PRESENT,
+    KNOWN_CERTIFICATE_CONTENT_MISMATCH,
+    ERRORED_CERTIFICATE,
+    
+};
+
+
 enum ProcessingStatus{
     WAIT_FOR_COMPLETE_MESSAGE_HEADER = 0,
     WAIT_FOR_COMPLETE_MESSAGE_BODY = 1,
     PROCESSED = 1<<1,
     MORE_TO_READ = 1<<2,
-    //WAIT_FOR_RELAY_ANSWER = 1<<3,
-    ERROR = 1<<4
+    ERROR = 1<<3
 };
 
 namespace ServerConfig {
