@@ -303,12 +303,6 @@ std::pair<bool,bool> flush_sendbuf(socket_t socketfd, ConnectionInfo & connectio
         return {true,true};
     }
 
-    std::pair<bool,bool> ret;
-    ret = {true,false}; //Default return: Socket up, but not everything sent yet.
-    auto &[is_socket_still_up,was_everything_sent] = ret;
-
-    SSL* ssl = connection_info.ssl;
-
     if(connection_info.connection_type == ConnectionType::MODULE_API){
         //Easy flush, simply write without respecting ssl.
         return flush_write_connInfo_without_SSL(connection_info,epollfd,socketfd);
@@ -373,12 +367,13 @@ bool flush_read_connInfo_without_SSL(ConnectionInfo &connection_info, const int 
         if(bytes_flushed > 0){
             //Append the bytes read to the recvbuf
             recvbuf.insert(std::end(recvbuf),std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
-            recvbuf.erase(std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
+            temp_buffer.erase(std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
         } else if (bytes_flushed == -1){
             if(errno == EAGAIN || errno == EWOULDBLOCK){
                 // We should try reading later
                 return true; // Socket is still up
             }else{
+                std::cout << strerror(errno) << std::endl;
                 // An error occurred, tear down the connection
                 tear_down_connection(epollfd, socketfd);
                 return false; // Socket is down
@@ -1807,6 +1802,7 @@ void prepare_SSL_Config(in_port_t host_p2p_port){
     BIO *bio = BIO_new(BIO_s_mem());
     PEM_write_bio_X509(bio, SSLConfig::cert);
     int cert_len = BIO_pending(bio);
+    SSLConfig::cert_len = cert_len;
     uint32_t net_length = htonl(cert_len);  // Convert length to network byte order
 
     //Allocate [<lengthprefix><certificate>] bytes.    [ ] <-- describes the extent of malloc.
@@ -1999,7 +1995,7 @@ int main(int argc, char const *argv[])
 
             if (host_module_port == host_p2p_port) {
                 std::cerr << "Cannot setup Module API server and P2P server on the same port (" << host_module_port << "). Exiting." << std::endl;
-                return -1;
+                return 1;
             }
             std::cout << "Modules reach this server on " << host_address_string << ":" << host_module_port << std::endl;
             std::cout << "We communicate with peers on " << host_address_string << ":" << host_p2p_port << std::endl;
@@ -2074,7 +2070,7 @@ int main(int argc, char const *argv[])
 
     if(should_connect_to_network) {
         if (!connect_to_network(peer_port, peer_address_string, peer_address)) {
-            return -1;
+            return 1;
         }
     }
 
