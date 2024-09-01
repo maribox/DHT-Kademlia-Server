@@ -121,10 +121,10 @@ bool is_valid_P2P_type(u_short value);
 bool is_valid_DHT_type(u_short dht_type);
 
 void build_DHT_header(Message& message, size_t message_size, u_short message_type);
-void write_body(Message& message, size_t body_offset, unsigned char* data, size_t data_size);
+void write_body(Message& message, size_t body_offset, const unsigned char* data, size_t data_size);
 void read_body(const Message& message, size_t body_offset, unsigned char* data, size_t data_size);
 
-bool forge_DHT_message(socket_t socket, Message message, int epollfd = -1);
+bool forge_DHT_message(socket_t socketfd, Message &message, int epollfd = -1);
 
 bool forge_DHT_put(socket_t socket, Key& key, Value& value);
 bool handle_DHT_put(socket_t socket, u_short body_size);
@@ -132,7 +132,7 @@ bool handle_DHT_put(socket_t socket, u_short body_size);
 bool forge_DHT_get(socket_t socket, Key& key);
 bool handle_DHT_get(socket_t socket, u_short body_size);
 
-bool forge_DHT_success(socket_t socket, Key& key, Value& value);
+bool forge_DHT_success(socket_t socket, const Key& key, const Value& value);
 bool handle_DHT_success(socket_t socket, u_short body_size);
 
 bool forge_DHT_failure(socket_t socket, Key& key);
@@ -155,7 +155,7 @@ bool handle_DHT_RPC_find_node_reply(socket_t socket, u_short body_size, std::set
 
 bool forge_DHT_RPC_find_value(socket_t socket, Key& key);
 bool handle_DHT_RPC_find_value(socket_t socket, u_short body_size);
-bool forge_DHT_RPC_find_value_reply(socket_t socket, Key rpc_id, Key& key, Value& value);
+bool forge_DHT_RPC_find_value_reply(socket_t socket, Key rpc_id, const Key& key, const Value& value);
 bool handle_DHT_RPC_find_value_reply(socket_t socket, u_short body_size);
 
 bool forge_DHT_error(socket_t socket, ErrorType error);
@@ -174,6 +174,6 @@ socket_t setup_server_socket(u_short port);
 socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_short port, const ConnectionType connection_type);
 int setup_epollin(int epollfd, socket_t serversocket);
 
-bool handle_EPOLLIN(auto epollfd, epoll_event current_event);
+bool handle_EPOLLIN(int epollfd, epoll_event current_event);
 
 int parse_commandline_args(int argc, const char* argv[]);

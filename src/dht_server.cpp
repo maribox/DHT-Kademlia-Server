@@ -496,8 +496,8 @@ void build_RPC_header(Message& message, Key& rpc_id) {
     NodeID node_id = routing_table.get_local_node().id;
     u_short port = routing_table.get_local_node().port;
     u_short network_order_port = htons(port);
-    write_body(message, 0, node_id.data(), NODE_ID_SIZE);
-    write_body(message, NODE_ID_SIZE, reinterpret_cast<unsigned char*>(&network_order_port), 2);
+    write_body(message, 0UL, node_id.data(), NODE_ID_SIZE);
+    write_body(message, NODE_ID_SIZE, reinterpret_cast<unsigned char*>(network_order_port), 2UL);
     write_body(message, NODE_ID_SIZE + 2, rpc_id.data(), RPC_ID_SIZE);
 }
 
@@ -528,12 +528,12 @@ void read_body(const Message& message, size_t body_offset, unsigned char* data, 
     std::copy_n(message.data() + HEADER_SIZE + body_offset, data_size, data);
 }
 
-bool forge_DHT_message(socket_t socket, Message &message, int epollfd) {
+bool forge_DHT_message(socket_t socketfd, Message &message, int epollfd) {
     int sent = 0;
     if (message.size() > 0) {
         //TODO: BUG! WRONG! WRITE INTO CONNECT INFO STRUCT. Let epoll handle it
         //TODO: Abstract mem copying to std::vector of connect info struct in writer method
-        sent = write(socket, message.data(), message.size());
+        sent = write(socketfd, message.data(), message.size());
     }
     // if write wasn't completed yet, rest will be sent with epoll wait
     if (sent == -1) {
@@ -547,8 +547,8 @@ bool forge_DHT_message(socket_t socket, Message &message, int epollfd) {
 
     epoll_event event{};
     event.events = EPOLLIN | EPOLLOUT;
-    event.data.fd = socket;
-    epoll_ctl(epollfd, EPOLL_CTL_MOD, socket, &event);
+    event.data.fd = socketfd;
+    epoll_ctl(epollfd, EPOLL_CTL_MOD, socketfd, &event);
 
     return true;
 }
@@ -777,8 +777,8 @@ bool forge_DHT_success(socket_t socket, const Key &key, const Value &value) {
     build_DHT_header(message, message_size, DHT_SUCCESS);
     write_body(message, 0, key.data(), KEY_SIZE);
     write_body(message, KEY_SIZE, value.data(), value.size());
-
-    return forge_DHT_message(socket, message);
+    //TODO: Pass epollfds to methods that write.
+    return forge_DHT_message(socket, message,-1);
 }
 
 bool handle_DHT_success(socket_t socket, u_short body_size) {
@@ -1263,7 +1263,7 @@ ProcessingStatus try_processing(socket_t curfd){
 }
 
 
-void accept_new_connection(int epollfd, epoll_event &cur_event, ConnectionType connection_type) {
+void accept_new_connection(int epollfd, const epoll_event &cur_event, ConnectionType connection_type) {
     sockaddr_in6 client_addr{};
     socklen_t client_addr_len = sizeof(client_addr);
     socket_t socketfd = accept4(cur_event.data.fd, reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len, SOCK_NONBLOCK);
