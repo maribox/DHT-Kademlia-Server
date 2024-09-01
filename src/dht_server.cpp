@@ -1574,7 +1574,7 @@ bool handle_EPOLLOUT(int epollfd, const epoll_event &current_event){
 
 
 
-    
+    return true;
 }
 
 void remove_client(int epollfd, int curfd) {
@@ -1668,7 +1668,6 @@ bool read_EPOLLIN(int epollfd, const epoll_event& current_event){
 
     }
 
-    std::cout << "Received new request." << std::endl;
     std::array<unsigned char, 4096> recv_buf{};
     ssize_t total_bytes_read = 0;
 
@@ -1702,19 +1701,24 @@ bool read_EPOLLIN(int epollfd, const epoll_event& current_event){
 }
 
 bool handle_EPOLLIN(int epollfd, const epoll_event& current_event) { // returns whether the socket is still valid and should be kept open
-    std::cout << "Received new request." << std::endl;
+    socket_t socketfd = current_event.data.fd;
     if (!read_EPOLLIN(epollfd, current_event)) {
         return false;
     }
+    if (recv_buffer_empty(connection_map[socketfd])) {
+        return true;
+    }
+    std::cout << "Received new request." << std::endl;
     ProcessingStatus processing_status;
     do {
-        processing_status = try_processing(current_event.data.fd);
+        processing_status = try_processing(socketfd);
         std::cout << "Processing finished: " << processing_status
                 << std::endl;
     } while (processing_status == MORE_TO_READ);
     // TODO: Sometimes reading too much as value. Maybe race condition (look at python test module)
     if (processing_status == ProcessingStatus::ERROR) {
         std::cerr << "Had error with processing. Closing channel to e.g. unreachable or misbehaving peer." << std::endl;
+        tear_down_connection(epollfd, socketfd);
         return false;
     }
     return true;
