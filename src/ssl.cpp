@@ -1,35 +1,9 @@
-#pragma once
+#include "ssl.h"
 
-#include <iostream>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
-#include <openssl/evp.h>
-#include <openssl/rsa.h>
-#include <openssl/pem.h>
-#include <openssl/rand.h>
-#include <openssl/x509.h>
-#include <openssl/x509v3.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <string.h>
-#include <array>
-#include <cstring>
-#include <cstring>
-#include <sstream>
-#include <fstream>
-#include <unordered_map>
-#include <cstdint>  // for uintptr_t
-#include <ifaddrs.h>
+#define VERBOSE
 
-#include <iomanip>
 
-using CertificateMap = std::unordered_map<std::string, std::string>; //maps IDs to certificates
-
-#include <fcntl.h>
-#include <unistd.h>
-#include <iostream>
-
-bool is_non_blocking(int fd) {
+bool NetworkUtils::is_non_blocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) {
         std::cerr << "fcntl failed" << std::endl;
@@ -38,21 +12,21 @@ bool is_non_blocking(int fd) {
     return (flags & O_NONBLOCK) != 0;
 }
 
-void check_ssl_blocking_mode(SSL *ssl) {
+void SSLUtils::check_ssl_blocking_mode(SSL *ssl) {
     int fd = SSL_get_fd(ssl);
     if (fd == -1) {
         std::cerr << "SSL_get_fd failed" << std::endl;
         return;
     }
 
-    if (is_non_blocking(fd)) {
+    if (NetworkUtils::is_non_blocking(fd)) {
         std::cout << "SSL operations are non-blocking." << std::endl;
     } else {
         std::cout << "SSL operations are blocking." << std::endl;
     }
 }
 
-bool getIPv6(char* buffer, size_t size){
+bool NetworkUtils::getIPv6(char* buffer, size_t size){
     ifaddrs *interfaces, *ifa;
     char ipstr[INET6_ADDRSTRLEN];
 
@@ -82,7 +56,7 @@ bool getIPv6(char* buffer, size_t size){
 }
 
 // Function to save the private key to a file
-void save_private_key(EVP_PKEY* pkey, const std::string& filename) {
+void KeyUtils::save_private_key(EVP_PKEY* pkey, const std::string& filename) {
     FILE* file = fopen(filename.c_str(), "w+b"); //write as new binary file (w+b inary)
     if (file) {
         PEM_write_PrivateKey(file, pkey, nullptr, nullptr, 0, nullptr, nullptr);
@@ -92,7 +66,7 @@ void save_private_key(EVP_PKEY* pkey, const std::string& filename) {
     }
 }
 
-void save_public_key(EVP_PKEY* pkey, const std::string& filename) {
+void KeyUtils::save_public_key(EVP_PKEY* pkey, const std::string& filename) {
     FILE* file = fopen(filename.c_str(), "w+b"); //write as new binary file (w+b inary)
     if (file) {
         PEM_write_PUBKEY(file, pkey);
@@ -102,7 +76,7 @@ void save_public_key(EVP_PKEY* pkey, const std::string& filename) {
     }
 }
 
-void save_certificate(X509* cert, const std::string& filename) {
+void CertUtils::save_certificate(X509* cert, const std::string& filename) {
     FILE* file = fopen(filename.c_str(), "w+b"); //write as new binary file (w+b inary)
     if (file) {
         PEM_write_X509(file, cert);
@@ -112,42 +86,45 @@ void save_certificate(X509* cert, const std::string& filename) {
     }
 }
 
-
-
-// Function to load the certificate map from a file
-CertificateMap load_certificate_map(const std::string& filename) {
+CertificateMap CertUtils::load_certificate_map(const std::string& filename) {
     CertificateMap cert_map;
     std::ifstream file(filename);
 
     if (file.is_open()) {
-        std::string id, cert;
+        std::string id, cert, port_str;
         while (std::getline(file, id)) {
-            std::ostringstream cert_stream;
-            std::string line;
-            while (std::getline(file, line) && !line.empty()) {
-                cert_stream << line << "\n";
+            if (std::getline(file, port_str)) {
+                in_port_t port = static_cast<in_port_t>(std::stoi(port_str));
+                std::ostringstream cert_stream;
+                std::string line;
+                while (std::getline(file, line) && !line.empty()) {
+                    cert_stream << line << "\n";
+                }
+                cert_map[id] = {port, cert_stream.str()};
             }
-            cert_map[id] = cert_stream.str();
         }
         file.close();
     }
     return cert_map;
 }
 
+
+
+
 // Function to save the certificate map to a file
-void save_certificate_map(const CertificateMap& cert_map, const std::string& filename) {
+void CertUtils::save_certificate_map(const CertificateMap& cert_map, const std::string& filename) {
     std::ofstream file(filename, std::ios::trunc);
 
     if (file.is_open()) {
         for (const auto& pair : cert_map) {
-            file << pair.first << "\n" << pair.second << "\n\n";
+            file << pair.first << "\n" << pair.second.first << "\n" << pair.second.second << "\n\n";
         }
         file.close();
     }
 }
 
 // Helper function to convert binary data to a hexadecimal string (ID conversion)
-std::string bin_to_hex(const unsigned char* data, size_t len) {
+std::string Utils::bin_to_hex(const unsigned char* data, size_t len) {
     std::ostringstream oss;
     for (size_t i = 0; i < len; ++i) {
         oss << std::setw(2) << std::setfill('0') << std::hex << (int)data[i];
@@ -157,7 +134,7 @@ std::string bin_to_hex(const unsigned char* data, size_t len) {
 
 
 // Function to send data with length prefix
-void send_data_with_length_prefix(int sock_fd, const char* data, size_t length) {
+void NetworkUtils::send_data_with_length_prefix(int sock_fd, const char* data, size_t length) {
     // Prefix: 4 bytes for length
     uint32_t data_length = static_cast<uint32_t>(length);
     uint32_t net_length = htonl(data_length);
@@ -175,7 +152,7 @@ void send_data_with_length_prefix(int sock_fd, const char* data, size_t length) 
 }
 
 // Function to send the and certificate
-void send_certificate(int client_fd, X509* cert) {
+void SSLUtils::send_certificate(int client_fd, X509* cert) {
 
     // Send certificate
     BIO *bio = BIO_new(BIO_s_mem());
@@ -185,13 +162,15 @@ void send_certificate(int client_fd, X509* cert) {
     BIO_read(bio, cert_data, cert_len);
     BIO_free(bio);
 
-    send_data_with_length_prefix(client_fd, cert_data, cert_len);
+    NetworkUtils::send_data_with_length_prefix(client_fd, cert_data, cert_len);
     free(cert_data);
 }
 
 
+
+
 // Function to receive data with length prefix
-char* receive_data_with_length_prefix(int sock_fd, size_t& length) {
+char* NetworkUtils::receive_data_with_length_prefix(int sock_fd, size_t& length) {
     // Receive the length prefix
     uint32_t net_length;
     if (recv(sock_fd, &net_length, sizeof(net_length), 0) <= 0) {
@@ -225,13 +204,75 @@ char* receive_data_with_length_prefix(int sock_fd, size_t& length) {
     return buffer;
 }
 
+void NetworkUtils::prepare_data_with_length_prefix(std::vector<unsigned char>& buffer, const char* data, const size_t length) {
+    // Clear the buffer to ensure it's empty before appending new data
+    if(buffer.size() != 0){
+        #ifdef VERBOSE
+        std::cout << "Preperation to send length-prefixed data (normally certificate) failed. Buffer already contained elements!" << std::endl;
+        #endif
+        buffer.clear();
+    }
+    // Prefix: 4 bytes for length
+    uint32_t data_length = static_cast<uint32_t>(length);
+    uint32_t net_length = htonl(data_length);  // Convert length to network byte order
+
+    // Resize the buffer to accommodate the length prefix and the actual data
+    buffer.resize(sizeof(net_length) + length);
+
+    // Write the length prefix to the buffer
+    std::memcpy(buffer.data(), &net_length, sizeof(net_length));
+
+    // Write the actual data to the buffer, after the length prefix
+    std::memcpy(buffer.data() + sizeof(net_length), data, length);
+}
+
+
+char* NetworkUtils::extract_data_with_length_prefix(const std::vector<unsigned char>& buffer, size_t& length) {
+    // Ensure the buffer is large enough to contain the length prefix
+    if (buffer.size() < sizeof(uint32_t)) {
+        std::cerr << "Buffer is too small to contain the length prefix." << std::endl;
+        return nullptr;
+    }
+
+    // Extract the length prefix
+    uint32_t net_length;
+    std::memcpy(&net_length, buffer.data(), sizeof(net_length));
+    uint32_t data_length = ntohl(net_length);
+
+    // Ensure the buffer contains the full data as specified by the length prefix
+    if (buffer.size() < sizeof(uint32_t) + data_length) {
+        std::cerr << "Buffer is smaller than expected data length." << std::endl;
+        return nullptr;
+    }
+
+    // Allocate buffer for the actual data
+    char* data = (char*)malloc(data_length);
+    if (data == nullptr) {
+        std::cerr << "Memory allocation failed." << std::endl;
+        return nullptr;
+    }
+
+    // Copy the actual data from the vector to the allocated buffer
+    std::memcpy(data, buffer.data() + sizeof(uint32_t), data_length);
+
+    // Set the length output parameter
+    length = data_length;
+
+    return data;
+}
+
+
+
+
+
+
 // Function to receive the certificate
-void receive_certificate(int sock_fd, X509*& cert) {
+void SSLUtils::receive_certificate(int sock_fd, X509*& cert) {
     size_t length;
 
 
     // Receive certificate
-    char* cert_data = receive_data_with_length_prefix(sock_fd, length);
+    char* cert_data = NetworkUtils::receive_data_with_length_prefix(sock_fd, length);
     if (!cert_data) {
         std::cerr << "Failed to receive certificate data" << std::endl;
         return;
@@ -261,7 +302,7 @@ void receive_certificate(int sock_fd, X509*& cert) {
 
 //-----
 
-void print_hex(const unsigned char *s, size_t length)
+void Utils::print_hex(const unsigned char *s, size_t length)
 {
     for(size_t l = 0; l < length; l++)
         printf("%02x", (unsigned int) *s++);
@@ -269,7 +310,7 @@ void print_hex(const unsigned char *s, size_t length)
 }
 
 
-EVP_PKEY* generate_rsa_key() {
+EVP_PKEY* KeyUtils::generate_rsa_key() {
     EVP_PKEY* pkey = nullptr;
     EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
     
@@ -298,7 +339,7 @@ EVP_PKEY* generate_rsa_key() {
     return pkey;
 }
 
-X509* create_self_signed_cert(EVP_PKEY* pkey, const std::string& ipv6, const std::string& id) {
+X509* CertUtils::create_self_signed_cert(EVP_PKEY* pkey, const std::string& ipv6, const std::string& id) {
 
     X509* x509 = X509_new();
     if (!x509) {
@@ -382,7 +423,7 @@ X509* create_self_signed_cert(EVP_PKEY* pkey, const std::string& ipv6, const std
     return x509;
 }
 
-SSL_CTX* create_context(bool am_i_server) {
+SSL_CTX* SSLUtils::create_context(bool am_i_server) {
     const SSL_METHOD* method;
     SSL_CTX* ctx;
 
@@ -402,7 +443,7 @@ SSL_CTX* create_context(bool am_i_server) {
 }
 
 // Function to extract IPv6 address from the Subject Alternative Name extension
-bool extract_ipv6_from_cert(X509* cert, std::string& ipv6) {
+bool SSLUtils::extract_ipv6_from_cert(X509* cert, std::string& ipv6) {
     // Get the Subject Alternative Name extension
     X509_EXTENSION* ext = X509_get_ext(cert, X509_get_ext_by_NID(cert, NID_subject_alt_name, -1));
     if (!ext) return false;
@@ -428,7 +469,7 @@ bool extract_ipv6_from_cert(X509* cert, std::string& ipv6) {
 }
 
 // Function to extract custom ID from a specific extension
-bool extract_custom_id(X509* cert, unsigned char* received_id, size_t id_len) {
+bool SSLUtils::extract_custom_id(X509* cert, unsigned char* received_id) {
     // Get the index of the custom extension by its NID
     int ext_index = X509_get_ext_by_NID(cert, NID_userId, -1);
     if (ext_index == -1) {
@@ -454,12 +495,12 @@ bool extract_custom_id(X509* cert, unsigned char* received_id, size_t id_len) {
     std::memcpy(received_id, octet_string->data, 32);
     
     std::cout << "Received ID as hex: ";
-    print_hex(received_id, 32);
+    Utils::print_hex(received_id, 32);
     return true; // Successfully extracted the ID
 }
 
 
-void write_test_msg(SSL* ssl){
+void SSLUtils::write_test_msg(SSL* ssl){
     const char *msg = "Hello";
     int len = strlen(msg);
     int bytes_written = SSL_write(ssl, msg, len);
@@ -478,7 +519,7 @@ void write_test_msg(SSL* ssl){
     return;
 }
 
-void read_test_msg(SSL* ssl, char * buffer, size_t buflen){
+void SSLUtils::read_test_msg(SSL* ssl, char * buffer, size_t buflen){
     int bytes_read = SSL_read(ssl, buffer, buflen-1);
 
     if (bytes_read > 0) {
@@ -497,7 +538,7 @@ void read_test_msg(SSL* ssl, char * buffer, size_t buflen){
     }
 }
 
-bool compare_x509_certs(X509* cert1, X509* cert2) {
+bool SSLUtils::compare_x509_certs(X509* cert1, X509* cert2) {
     if (!cert1 || !cert2) {
         return false;
     }
@@ -578,7 +619,7 @@ bool compare_x509_certs(X509* cert1, X509* cert2) {
 }
 
 
-bool compare_x509_cert_with_pem(X509* received_cert, const std::string& stored_pem_str) {
+bool SSLUtils::compare_x509_cert_with_pem(X509* received_cert, const std::string& stored_pem_str) {
     if (!received_cert) {
         return false;
     }
@@ -602,4 +643,59 @@ bool compare_x509_cert_with_pem(X509* received_cert, const std::string& stored_p
     X509_free(stored_cert);
 
     return result;
+}
+
+SSLStatus SSLUtils::try_ssl_accept(SSL* ssl){
+    int ssl_accept_result;
+    ssl_accept_result = SSL_accept(ssl);
+    if(ssl_accept_result <= 0){
+        int ssl_error = SSL_get_error(ssl, ssl_accept_result);
+        if (ssl_error == SSL_ERROR_WANT_READ || SSL_ERROR_WANT_WRITE){
+            return SSLStatus::AWAITING_ACCEPT;
+        }
+        else {
+            return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
+        }
+    }
+    return SSLStatus::ACCEPTED;
+}
+
+SSLStatus SSLUtils::try_ssl_connect(SSL* ssl){
+    int ssl_connect_result;
+    ssl_connect_result = SSL_connect(ssl);
+    if(ssl_connect_result <= 0){
+        int ssl_error = SSL_get_error(ssl, ssl_connect_result);
+        if (ssl_error == SSL_ERROR_WANT_READ || SSL_ERROR_WANT_WRITE){
+            return SSLStatus::AWAITING_CONNECT;
+        }
+        else {
+            return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
+        }
+    }
+    return SSLStatus::CONNECTED;
+}
+
+
+bool SSLUtils::isAliveSSL(SSLStatus status){
+    return status == SSLStatus::ACCEPTED || status == SSLStatus::CONNECTED;
+}
+
+X509* SSLUtils::load_cert_from_char(const unsigned char* cert_str, size_t cert_len) {
+    BIO* bio = BIO_new_mem_buf(cert_str, cert_len);  // Create a new BIO with the certificate data
+
+    if (!bio) {
+        std::cerr << "Failed to create BIO\n";
+        return nullptr;
+    }
+
+    X509* cert = PEM_read_bio_X509(bio, nullptr, 0, nullptr);  // Read the certificate
+
+    if (!cert) {
+        std::cerr << "Failed to parse certificate\n";
+        BIO_free(bio);  // Free the BIO object
+        return nullptr;
+    }
+
+    BIO_free(bio);  // Free the BIO object after use
+    return cert;    // Return the X509 certificate object
 }

@@ -1,15 +1,5 @@
 #include "ssl.cpp"
-#include <iostream>
-#include <ifaddrs.h>
-#include <netinet/in.h>
-#include <cstring>
-#include <sstream>
-#include <fstream>
-#include <iomanip>
-#include <unordered_map>
-#include <cstdint>  // for uintptr_t
-#include <signal.h>
-#include <unistd.h>  // For sleep()
+
 
 
 #define P2PServerPort 7402
@@ -36,7 +26,7 @@ int main(int argc, char const *argv[])
 
     std::cout << "Argument parsing complete. Am i server? " << (am_i_server? "Yes":"No") << ". Port" << (am_i_server? " to connect to":"") << ": " << port << std::endl;
     std::string certmap_filename = "cert_map" + std::string(am_i_server ? "_s" : "_c") + ".txt";
-    CertificateMap cert_map = load_certificate_map(certmap_filename);
+    CertificateMap cert_map = CertUtils::load_certificate_map(certmap_filename);
 
 
 
@@ -45,7 +35,6 @@ int main(int argc, char const *argv[])
     SSL_load_error_strings();
     OpenSSL_add_ssl_algorithms();
 
-    //End of certificate generation. Testing needed. Next: Transmit certificate and pubkey over insecure TCP connection:--------------
 
     int sock_fd;
     SSL_CTX* ctx;
@@ -54,26 +43,26 @@ int main(int argc, char const *argv[])
     if(am_i_server){
         //Setup everything needed for ssl. Especially, generate own, self-signed certificate.
 
-        EVP_PKEY* pkey = generate_rsa_key();
+        EVP_PKEY* pkey = KeyUtils::generate_rsa_key();
         if (!pkey) {
             std::cerr << "Failed to generate RSA key pair" << std::endl;
             return EXIT_FAILURE;
         }
 
         //Generate random 256 bit P2P-ID:
-        std::array<unsigned char, 32> id; 
+        std::array<unsigned char, 32> id;
         if(RAND_priv_bytes(id.data(),id.size()) <= 0){
             std::cerr << "Failed to generate random bytes for custom P2P ID" << std::endl;
             EVP_PKEY_free(pkey);
             return EXIT_FAILURE;
         }
         std::cout << "Generated ID as hex ";
-        print_hex(id.data(), 32);
+        Utils::print_hex(id.data(), 32);
 
         //Retrieve own IPv6 ip to include in certificate:
         char ipv6_buf[INET6_ADDRSTRLEN];
 
-        if(!getIPv6(ipv6_buf,sizeof(ipv6_buf))){
+        if(!NetworkUtils::getIPv6(ipv6_buf,sizeof(ipv6_buf))){
             std::cerr << "Failed to retrieve own IPv6 address" << std::endl;
             EVP_PKEY_free(pkey);
             return EXIT_FAILURE;
@@ -83,7 +72,7 @@ int main(int argc, char const *argv[])
 
         //Generate self-signed certificate
 
-        X509* cert = create_self_signed_cert(pkey, ipv6_buf,reinterpret_cast<const char*>(id.data()));
+        X509* cert = CertUtils::create_self_signed_cert(pkey, ipv6_buf,reinterpret_cast<const char*>(id.data()));
         if(!cert){
             std::cerr << "Failed to generate self-signed X509 certificate" << std::endl;
             EVP_PKEY_free(pkey);
@@ -91,9 +80,9 @@ int main(int argc, char const *argv[])
         }
 
         // Save the private key and certificate to files
-        save_private_key(pkey, "private_key.pem");
-        save_public_key(pkey, "public_key.pem"); //Optional, could be derived
-        save_certificate(cert, "certificate.pem");
+        KeyUtils::save_private_key(pkey, "private_key.pem");
+        KeyUtils::save_public_key(pkey, "public_key.pem"); //Optional, could be derived
+        CertUtils::save_certificate(cert, "certificate.pem");
 
 
         sock_fd = socket(AF_INET6, SOCK_STREAM, 0); //socket fd to accept incoming connection (server)
@@ -128,10 +117,10 @@ int main(int argc, char const *argv[])
 
 
         // Send public key and certificate with length prefix
-        send_certificate(client_fd, cert);
+        SSLUtils::send_certificate(client_fd, cert);
 
         //SSL context
-        ctx = create_context(true);
+        ctx = SSLUtils::create_context(true);
         SSL_CTX_use_certificate(ctx, cert);
         SSL_CTX_use_PrivateKey(ctx, pkey);
 
@@ -144,7 +133,7 @@ int main(int argc, char const *argv[])
         }
         SSL_set_fd(ssl, client_fd);
 
-        check_ssl_blocking_mode(ssl);
+        SSLUtils::check_ssl_blocking_mode(ssl);
 
         int ret = SSL_accept(ssl);
         if (ret <= 0) {
@@ -159,7 +148,7 @@ int main(int argc, char const *argv[])
         //Transmit data securely over ssl encrypted socket (ssl)
         char msg_buffer[256];
         
-        read_test_msg(ssl,msg_buffer, 256);
+        SSLUtils::read_test_msg(ssl,msg_buffer, 256);
 
         //Clean everything;
         EVP_PKEY_free(pkey);
@@ -183,27 +172,26 @@ int main(int argc, char const *argv[])
         }
         // Receive public key over insecure channel (TOFU)
         X509* cert = nullptr;
-        receive_certificate(sock_fd, cert);
+        SSLUtils::receive_certificate(sock_fd, cert);
 
         std::cout << "Cert pointer value:" << reinterpret_cast<uintptr_t>(cert) << std::endl;
         
         // Retrieve the ID from the certificate
         unsigned char received_id[32];
-        if (extract_custom_id(cert, received_id, sizeof(received_id))) {
+        if (SSLUtils::extract_custom_id(cert, received_id)) {
             std::cout << "ID extracted successfully" << std::endl;
         } else {
             std::cerr << "Failed to extract ID from certificate." << std::endl;
         }
-        std::string hex_id = bin_to_hex(received_id, 32);
+        std::string hex_id = Utils::bin_to_hex(received_id, 32);
         std::string ipv6_str{};
         
-        if(extract_ipv6_from_cert(cert,ipv6_str)){
+        if(SSLUtils::extract_ipv6_from_cert(cert,ipv6_str)){
             std::cout << "IPv6 extracted successfully: " << ipv6_str << std::endl;
         }else{
             std::cerr << "Failed to extract IPv6 from certificate." << std::endl;
         }
         std::cout << "Checkpoint Client side" << std::endl;
-
 
 
         if (cert_map.find(hex_id) != cert_map.end()) {
@@ -219,7 +207,7 @@ int main(int argc, char const *argv[])
             cert_pem[cert_len] = '\0';
             BIO_free(bio);
 
-            cert_map[hex_id] = std::string(cert_pem);
+            cert_map[hex_id] = std::pair{port,std::string(cert_pem)};
             free(cert_pem);
         }
 
@@ -232,8 +220,8 @@ int main(int argc, char const *argv[])
         */
         
         // Save the updated certificate map
-        save_certificate_map(cert_map, certmap_filename);
-        ctx = create_context(false);
+        CertUtils::save_certificate_map(cert_map, certmap_filename);
+        ctx = SSLUtils::create_context(false);
 
         X509_STORE* store = SSL_CTX_get_cert_store(ctx);
         if (X509_STORE_add_cert(store, cert) != 1) {
@@ -243,7 +231,7 @@ int main(int argc, char const *argv[])
         ssl = SSL_new(ctx);
         SSL_set_fd(ssl, sock_fd);
         
-        check_ssl_blocking_mode(ssl);
+        SSLUtils::check_ssl_blocking_mode(ssl);
 
 
         int ret = SSL_connect(ssl);
@@ -254,7 +242,7 @@ int main(int argc, char const *argv[])
             // Handle the error based on the error code (e.g., try again, log, exit)
         }
         
-        write_test_msg(ssl);
+        SSLUtils::write_test_msg(ssl);
         sleep(1);
 
         std::cout << "Client exited regularly." << std::endl;

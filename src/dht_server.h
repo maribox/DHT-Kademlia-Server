@@ -10,6 +10,7 @@
 
 #include "routing.h"
 #include "common_types.h"
+#include "ssl.h"
 
 /* Naming scheme:
     classes/enums/structs/namespaces and types -> PascalCase
@@ -42,25 +43,39 @@ namespace ServerConfig {
     static constexpr u_short P2P_PORT = 7402;
 };
 
+namespace SSLConfig {
+    extern NodeID id;
+    extern char ipv6_buf[INET6_ADDRSTRLEN];
+    extern EVP_PKEY *pkey;
+    extern X509 *cert;
+    extern unsigned char *length_prefixed_cert_str;
+    extern int cert_len;
+    extern SSL_CTX *server_ctx;
+    extern SSL_CTX *client_ctx;
+    extern X509_STORE * client_cert_store;
+    extern CertificateMap cert_map;
+    extern std::string certmap_filename;
+}
+
 enum class ConnectionType {
-    MODULE_API, P2P
+    MODULE_API = 0, P2P
+};
+
+enum class ConnectionRole { 
+    SERVER = 0, CLIENT
 };
 
 struct ConnectionInfo{
         ConnectionType connection_type;
+        ConnectionRole role;
         in6_addr client_addr;
         u_short client_port; // port in host byte order
-
+        SSL* ssl;
+        SSLStatus ssl_stat;
         Key rpc_id;
-        Message received_bytes;
-        bool received_bytes_in_use;
-        
-        Message send_bytes; // TODO: This is a todo send buffer. See epoll case EPOLLOUT.
-        size_t sent_bytes{0};
-        bool send_bytes_in_use;
-
-        socket_t relay_to{-1}; //Possibly relay the request to other server that sits closer (XOR) to the requested key.
-    };
+        Message receive_bytes;
+        Message send_bytes;
+        };
 
 enum ModuleApiType {
     DHT_PUT = 650,
@@ -96,7 +111,7 @@ bool operator==(const Key& lhs, const Key& rhs);
 std::string key_to_string(const Key& key);
 std::string ip_to_string(const in6_addr& ip);
 
-std::optional<Value> get_from_storage(const Key& key);
+Value* get_from_storage(const Key& key);
 void save_to_storage(const Key& key, Value val);
 
 bool is_in_my_range(Key key);
@@ -152,11 +167,11 @@ bool parse_P2P_request(socket_t socket, u_short body_size, P2PType p2p_type);
 
 ProcessingStatus try_processing(socket_t curfd);
 
-void accept_new_connection(int epollfd, std::vector<epoll_event>::value_type cur_event, ConnectionType connection_type);
+void accept_new_connection(int epollfd, const epoll_event &cur_event, ConnectionType connection_type);
 void run_event_loop(socket_t module_api_socket, socket_t p2p_socket, int epollfd, std::vector<epoll_event>& epoll_events);
 
 socket_t setup_server_socket(u_short port);
-socket_t setup_connect_socket(const in6_addr& address, u_short port, const ConnectionInfo &connection_info);
+socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_short port, const ConnectionType connection_type);
 int setup_epollin(int epollfd, socket_t serversocket);
 
 bool handle_EPOLLIN(auto epollfd, epoll_event current_event);

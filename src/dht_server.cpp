@@ -1,5 +1,4 @@
 #include "dht_server.h"
-#include "routing.h"
 
 #include <array>
 #include <sys/socket.h>
@@ -19,8 +18,24 @@
 #include <string_view>
 #include <chrono>
 
+#define VERBOSE
+
 //#include "routing.cpp"
 namespace progOpt = boost::program_options;
+
+namespace SSLConfig {
+    NodeID id;
+    char ipv6_buf[INET6_ADDRSTRLEN];
+    EVP_PKEY *pkey;
+    X509 *cert;
+    unsigned char *length_prefixed_cert_str;
+    int cert_len;
+    SSL_CTX *server_ctx;
+    SSL_CTX *client_ctx;
+    X509_STORE *client_cert_store;
+    CertificateMap cert_map;
+    std::string certmap_filename;
+}
 
 
 /*
@@ -41,7 +56,6 @@ static constexpr size_t DEFAULT_REPLICATION = 20; // should be same to K
 
 
 std::map<Key,std::pair<std::chrono::time_point<std::chrono::system_clock>, Value>> local_storage{};
-std::mutex storage_lock;
 
 RoutingTable routing_table;
 
@@ -105,10 +119,6 @@ struct std::hash<Value>
     }
 };
 
-bool is_in_my_range(Key key){
-    return true;
-}
-
 bool convert_to_ipv6(const std::string& address_string, struct in6_addr& address) {
     struct in_addr ipv4_addr;
     if (inet_pton(AF_INET6, address_string.c_str(), &address) == 1) {
@@ -147,42 +157,311 @@ std::string ip_to_string(const in6_addr& ip) {
     return std::string(ip_str);
 }
 
+bool send_buffer_empty(ConnectionInfo &connection_info){
+    return connection_info.send_bytes.size() == 0;
+}
+
+bool recv_buffer_empty(ConnectionInfo &connection_info){
+    return connection_info.receive_bytes.size() == 0;
+}
+
+
+void write_vector_to_sendbuf(ConnectionInfo &connection_info, const Message &to_send){
+    auto &write_buffer = connection_info.send_bytes;
+    write_buffer.reserve(write_buffer.size() + to_send.size()); //Avoid unnecessary reallocations
+    write_buffer.insert(std::end(write_buffer),std::begin(to_send),std::end(to_send));
+}
+
+void write_charptr_to_sendbuf(ConnectionInfo &connection_info, const unsigned char* to_send_ptr, const size_t length){
+    auto &write_buffer = connection_info.send_bytes;
+    write_buffer.reserve(write_buffer.size() + length); //Avoid unnecessary reallocations
+    write_buffer.insert(std::end(write_buffer), to_send_ptr, to_send_ptr + length);
+}
+
+void read_vector_from_recvbuf(ConnectionInfo &connection_info, Message &to_recv){
+    auto &read_buf = connection_info.receive_bytes;
+    to_recv.insert(std::end(to_recv), std::begin(read_buf),std::end(read_buf));
+    read_buf.clear();
+}
+
+
+
+// SSL
+
+void tear_down_connection(int epollfd, socket_t socketfd){
+
+    if(connection_map.contains(socketfd)){
+        ConnectionInfo connection_info = connection_map.at(socketfd);
+        //Module API socket (to client).
+        if(connection_info.connection_type == ConnectionType::MODULE_API){
+            close(socketfd);
+            return;
+        }
+        //Else: P2P Connection Type.
+        if(SSLUtils::isAliveSSL(connection_info.ssl_stat)){
+           //SSL connection is up. Shut it down.
+           SSL_shutdown(connection_info.ssl);
+        }
+        //Free ssl object of the connection.
+        SSL_free(connection_info.ssl);
+        //SSL objects all freed. Proceed with lower layer freeing.
+        close(socketfd);
+        connection_map.erase(socketfd);
+
+        epoll_ctl(epollfd,EPOLL_CTL_DEL,socketfd,nullptr);
+
+        #ifdef VERBOSE
+            std::cout << "Tore down connection running over port: " << connection_info.client_port << "." << std::endl;
+        #endif
+
+    }else{
+        //Should be a dead branch:
+        #ifdef VERBOSE
+        std::cout << "Supposedly dead control flow branch reached in tear_down_connection(...)" << std::endl;
+        #endif
+        close(socketfd);
+    }
+}
+
+
+//Returns <is_socket_still_up?,everything_was_sent?>
+std::pair<bool,bool> flush_write_connInfo_with_SSL(ConnectionInfo &connection_info, const int epollfd, const int socketfd){
+    auto &sendbuf = connection_info.send_bytes;
+
+    auto &ssl = connection_info.ssl;
+    int bytes_flushed;
+    std::pair ret = {true,false};
+    auto &[is_socket_still_up,was_everything_sent] = ret;
+    
+    do{
+        bytes_flushed = SSL_write(ssl,sendbuf.data(),sendbuf.size());
+        if(bytes_flushed <= 0){
+            int err = SSL_get_error(ssl, bytes_flushed);
+            if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
+                // Retry SSL_write() later.
+                std::cerr << "SSL write error, try again later" << std::endl;
+                is_socket_still_up = true;
+                was_everything_sent = false;
+                return ret;
+            } else {
+                tear_down_connection(epollfd,socketfd);
+                std::cerr << "Other SSL write error. Tore down connection." << std::endl;
+                is_socket_still_up = false;
+                was_everything_sent = false;
+                return ret;
+            }
+        }
+        //Partial written, advance buffer accordingly.
+        sendbuf.erase(std::begin(sendbuf),std::begin(sendbuf) + bytes_flushed);
+
+    } while(bytes_flushed > 0 && sendbuf.size() > 0);
+
+    is_socket_still_up = true;
+    was_everything_sent = true;
+    return ret;
+}
+
+//Returns <is_socket_still_up?,everything_was_sent?>
+std::pair<bool,bool> flush_write_connInfo_without_SSL(ConnectionInfo &connection_info, const int epollfd, const int socketfd){
+    auto &sendbuf = connection_info.send_bytes;
+
+    int bytes_flushed;
+    std::pair ret = {true,false};
+    auto &[is_socket_still_up,was_everything_sent] = ret;
+
+    do{
+        bytes_flushed = write(socketfd,sendbuf.data(),sendbuf.size());
+        if(bytes_flushed == -1){
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Retry write() later.
+                std::cerr << "Socket write error, try again later" << std::endl;
+                is_socket_still_up = true;
+                was_everything_sent = false;
+                return ret;
+            } else {
+                tear_down_connection(epollfd,socketfd);
+                std::cerr << "Other socket write error. Tore down connection." << std::endl;
+                is_socket_still_up = false;
+                was_everything_sent = false;
+                return ret;
+            }
+        }
+        //Partial written, advance buffer accordingly.
+        sendbuf.erase(std::begin(sendbuf),std::begin(sendbuf) + bytes_flushed);
+    } while(bytes_flushed > 0 && sendbuf.size() > 0);
+
+    is_socket_still_up = true;
+    was_everything_sent = true;
+    return ret;
+}
+
+//Returns <is_socket_still_up?,everything_was_sent?>
+std::pair<bool,bool> flush_sendbuf(socket_t socketfd, ConnectionInfo & connection_info, int epollfd){
+    auto &sendbuf = connection_info.send_bytes;
+    if(sendbuf.size() == 0){
+        return {true,true};
+    }
+
+    std::pair<bool,bool> ret;
+    ret = {true,false}; //Default return: Socket up, but not everything sent yet.
+    auto &[is_socket_still_up,was_everything_sent] = ret;
+
+    SSL* ssl = connection_info.ssl;
+
+    if(connection_info.connection_type == ConnectionType::MODULE_API){
+        //Easy flush, simply write without respecting ssl.
+        return flush_write_connInfo_without_SSL(connection_info,epollfd,socketfd);
+    }
+    
+    //We are in a ConnectionType::P2P
+
+    if(SSLUtils::isAliveSSL(connection_info.ssl_stat)){
+        //Write with SSL
+        return flush_write_connInfo_with_SSL(connection_info,epollfd,socketfd);
+    }
+    //Else: SSL is not active (yet). P2P-Connections enforce TLS, so this will happen soon.
+    //Server & Client write without SSL encryption
+    return flush_write_connInfo_without_SSL(connection_info,epollfd,socketfd);
+}
+
+
+bool flush_read_connInfo_with_SSL(ConnectionInfo &connection_info, const int epollfd, const int socketfd){
+    auto &recvbuf = connection_info.receive_bytes;
+
+    auto&ssl = connection_info.ssl;
+    int bytes_flushed;
+
+     std::vector<unsigned char> temp_buffer(4096); // Temporary buffer for reading
+
+    do{
+        bytes_flushed = SSL_read(ssl,temp_buffer.data(),temp_buffer.size());
+
+        if(bytes_flushed > 0){
+            //Append bytes to recvbuf
+            recvbuf.insert(std::end(recvbuf),std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
+            recvbuf.erase(std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
+        } else if (bytes_flushed == 0){
+            // Connection was closed by the peer
+            tear_down_connection(epollfd, socketfd);
+            return false; // Socket is down
+        } else{
+            int err = SSL_get_error(ssl,bytes_flushed);
+            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+                // We should try reading or writing later, nothing to tear down
+                return true; // Socket is still up
+            }
+            //An error occurred, tear down the connection
+            tear_down_connection(epollfd,socketfd);
+            return false; //Socket is down
+        }
+
+    }while (bytes_flushed>0);
+
+    return true; // Socket is still up
+}
+
+bool flush_read_connInfo_without_SSL(ConnectionInfo &connection_info, const int epollfd, const int socketfd){
+    auto &recvbuf = connection_info.receive_bytes;
+    int bytes_flushed;
+
+    std::vector<unsigned char> temp_buffer(4096); // Temporary buffer for reading
+
+    do{
+        bytes_flushed = read(socketfd, temp_buffer.data(), temp_buffer.size());
+
+        if(bytes_flushed > 0){
+            //Append the bytes read to the recvbuf
+            recvbuf.insert(std::end(recvbuf),std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
+            recvbuf.erase(std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
+        } else if (bytes_flushed == -1){
+            if(errno == EAGAIN || errno == EWOULDBLOCK){
+                // We should try reading later
+                return true; // Socket is still up
+            }else{
+                // An error occurred, tear down the connection
+                tear_down_connection(epollfd, socketfd);
+                return false; // Socket is down
+            }
+        }else if(bytes_flushed == 0){
+            // Connection was closed by the peer
+            tear_down_connection(epollfd, socketfd);
+            return false; // Socket is down
+        }
+    } while (bytes_flushed > 0);
+
+    return true; //Socket is still up
+}
+
+
+//Flushes the kernel-side socket-buffer into the connection_info receive_bytes buffer.
+//Returns if the socket is still valid (connection is not torn down).
+bool flush_recvbuf(socket_t socketfd, ConnectionInfo & connection_info, int epollfd){
+    if(connection_info.connection_type == ConnectionType::MODULE_API){
+        // Easy flush, simply read without respecting SSL
+        return flush_read_connInfo_without_SSL(connection_info, epollfd, socketfd);
+    }
+
+    //We are in a ConnectionType::P2P
+    if(SSLUtils::isAliveSSL(connection_info.ssl_stat)){
+        return flush_read_connInfo_with_SSL(connection_info,epollfd,socketfd);
+    }
+
+    // Else: SSL is not active (yet). P2P-Connections enforce TLS, so this will happen soon.
+    // Server & Client read without SSL encryption
+    return flush_read_connInfo_without_SSL(connection_info,epollfd,socketfd);
+}
+
+//Returns true if the socket is still active. If the return parameter foreign_cert_str is not nullptr, data was correctly extracted.
+bool receive_prefixed_sendbuf_in_charptr(const int epollfd, const socket_t socketfd, ConnectionInfo& connection_info,
+                                         unsigned char * foreign_length_prefixed_cert_str, uint32_t &length){
+    foreign_length_prefixed_cert_str = nullptr;
+    bool sock_still_active = flush_recvbuf(socketfd, connection_info,epollfd);
+    if(!sock_still_active){
+        return false;
+    }
+    auto &receive_buffer = connection_info.receive_bytes;
+
+    if(receive_buffer.size() < sizeof(uint32_t)){
+        //4 bytes are prefixed as length. If less is present, insufficient.
+        return true;
+    }
+    uint32_t net_length;
+    std::memcpy(&net_length,receive_buffer.data(),sizeof(net_length));
+    uint32_t data_length = ntohl(net_length);
+    if(receive_buffer.size() < sizeof(net_length) + data_length){
+        //Data was not fully received yet. Length prefix indicates that more data is awaited.
+        return true;
+    }
+    foreign_length_prefixed_cert_str = (unsigned char *)malloc(data_length);
+    if(!foreign_length_prefixed_cert_str){
+        return true;
+    }
+    std::memcpy(foreign_length_prefixed_cert_str, receive_buffer.data() + sizeof(uint32_t), data_length);
+    receive_buffer.erase(std::begin(receive_buffer), std::begin(receive_buffer) + sizeof(uint32_t) + data_length);
+    return true;
+}
 
 // Storage
 
 // Returns optional value, either the correctly looked up value, or no value.
-std::optional<Value> get_from_storage(const Key &key)
+Value* get_from_storage(const Key &key)
 {
-    // shouldn't be needed. Safety mesaure for now, based on python impl.
-    std::lock_guard<std::mutex> lock(storage_lock);
-    try
-    {
+        auto it = local_storage.find(key);
         // We could also perform kademlia tree index checks here.
-        if(local_storage.contains(key)){ //Log look-up hit, but maybe outdated.
-            auto [ttl,value] = local_storage.at(key);
-            auto now = std::chrono::system_clock::now();
-            if (ttl >= now)
-                return {value}; // Log lookup-hit.
-            else
-            {
-                local_storage.erase(key);
-                return {}; // Log lookup-miss.
-            }
+        if(it == local_storage.end()){ //Log look-up hit, but maybe outdated.
+            return nullptr;
         }
-        return {};
-    }
-    catch (std::out_of_range e)
-    {
-        // Log lookup-miss.
-        return {};
-    }
+        auto& [ttl,value] = it->second;
+        if (ttl < std::chrono::system_clock::now()){
+            local_storage.erase(it);
+            return nullptr; // Log lookup-miss.
+        }       
+        return &value; // Log lookup-hit.
 }
 
 void save_to_storage(const Key &key, std::chrono::seconds ttl, Value &val)
 {
-    std::lock_guard<std::mutex> lock(storage_lock);
-
-    auto fresh_insert = local_storage.insert_or_assign(key, std::pair{std::chrono::system_clock::now() + ttl,val});
+    auto [it, succ] = local_storage.insert_or_assign(key, std::pair{std::chrono::system_clock::now() + ttl,val});
     // Log fresh_insert. True equiv. to "New value created". False equiv. to
     // "Overwritten, assignment"
 }
@@ -241,7 +520,7 @@ Key read_rpc_header(const Message& message, in6_addr peer_ip) {
     return rpc_id;
 }
 
-void write_body(Message& message, size_t body_offset, unsigned char* data, size_t data_size) {
+void write_body(Message& message, size_t body_offset, const unsigned char* data, size_t data_size) {
     std::copy_n(data, data_size, message.data() + HEADER_SIZE + body_offset);
 }
 
@@ -249,9 +528,11 @@ void read_body(const Message& message, size_t body_offset, unsigned char* data, 
     std::copy_n(message.data() + HEADER_SIZE + body_offset, data_size, data);
 }
 
-bool forge_DHT_message(socket_t socket, Message message, int epollfd) {
+bool forge_DHT_message(socket_t socket, Message &message, int epollfd) {
     int sent = 0;
     if (message.size() > 0) {
+        //TODO: BUG! WRONG! WRITE INTO CONNECT INFO STRUCT. Let epoll handle it
+        //TODO: Abstract mem copying to std::vector of connect info struct in writer method
         sent = write(socket, message.data(), message.size());
     }
     // if write wasn't completed yet, rest will be sent with epoll wait
@@ -322,7 +603,7 @@ std::vector<Node> blocking_node_lookup(Key &key) {
 
         for (auto& node: closest_nodes) {
             if (node.port != 0 && node != routing_table.get_local_node()) {
-                socket_t sockfd = setup_connect_socket(node.addr, node.port, {ConnectionType::P2P});
+                socket_t sockfd = setup_connect_socket(epollfd, node.addr, node.port, ConnectionType::P2P);
                 setup_epollin(epollfd, sockfd);
                 forge_DHT_RPC_find_node(sockfd, key);
                 responses_left++;
@@ -339,7 +620,7 @@ std::vector<Node> blocking_node_lookup(Key &key) {
                     handle_EPOLLIN(epollfd, current_event);
 
                     socket_t sockfd = epoll_events[i].data.fd;
-                    auto connection_info = connection_map[sockfd];
+                    auto& connection_info = connection_map[sockfd];
 
                     u_short body_size = -1;
                     u_short dht_type = -1;
@@ -381,7 +662,10 @@ void crawl_blocking_and_store(Key &key, Value &value, int time_to_live, int repl
             continue;
         }
 
-        socket_t sockfd = setup_connect_socket(node.addr, node.port, {ConnectionType::P2P});
+        socket_t sockfd = -1;
+        /* Commented out for compilation. setup_connect_socket now needs an epoll instance... 
+        *socket_t sockfd = setup_connect_socket(node.addr, node.port, ConnectionType::P2P);
+        */
         if (sockfd != -1) {
             forge_DHT_RPC_store(sockfd, time_to_live, replication, key, value);
         }
@@ -391,7 +675,7 @@ void crawl_blocking_and_store(Key &key, Value &value, int time_to_live, int repl
 
 
 bool handle_DHT_put(socket_t socket, u_short body_size) {
-    const Message& message = connection_map[socket].received_bytes;
+    const Message& message = connection_map[socket].receive_bytes;
     int value_size = body_size - (4 + KEY_SIZE);
 
     // "Request of and storage of empty values is not allowed."
@@ -431,7 +715,7 @@ bool forge_DHT_get(socket_t socket, Key &key) {
 void crawl_blocking_and_return(Key &key, socket_t socket) {
     auto k_closest_nodes = blocking_node_lookup(key);
 
-    auto found_values = std::vector<Value>{};
+    auto found_values = std::vector<Value*>{};
     for (auto& node : k_closest_nodes) {
         if (node.port == 0) {
             continue;
@@ -439,14 +723,17 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
 
         if (node == routing_table.get_local_node()) {
             std::cout << "Trying to get key '" << key_to_string(key) << "' from own storage" << std::endl;
-            auto opt = get_from_storage(key);
-            if (opt) {
-                found_values.push_back(opt.value());
+            auto value = get_from_storage(key);
+            if (value) {
+                found_values.push_back(value);
             }
             continue;
         }
 
-        socket_t sockfd = setup_connect_socket(node.addr, node.port, {ConnectionType::P2P});
+        socket_t sockfd = -1;
+        /* Commented out for compilation. setup_connect_socket now needs an epoll instance... 
+        *socket_t sockfd = setup_connect_socket(node.addr, node.port, ConnectionType::P2P);
+        */
         if (sockfd != -1) {
             forge_DHT_RPC_find_value(sockfd, key);
         }
@@ -454,10 +741,11 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
 
     std::map<Value, int> frequency;
     for (auto& value : found_values) {
-        frequency[value]++;
+        frequency[*value]++;
     }
 
     if (found_values.size() > 0) {
+        //TODO: Was changed to auto& but yielded error. Reinvestigate
         auto most_frequent_element = std::max_element(frequency.begin(), frequency.end(),
                                   [](const std::pair<Value, int>& a, const std::pair<Value, int>& b) {
                                       return a.second < b.second;
@@ -472,7 +760,7 @@ bool handle_DHT_get(socket_t socket, u_short body_size) {
     if (body_size != KEY_SIZE) {
         return false;
     }
-    const Message& message = connection_map[socket].received_bytes;
+    const Message& message = connection_map[socket].receive_bytes;
     Key key;
     read_body(message, 0, key.data(), KEY_SIZE);
 
@@ -482,7 +770,7 @@ bool handle_DHT_get(socket_t socket, u_short body_size) {
     return true;
 }
 
-bool forge_DHT_success(socket_t socket, Key &key, Value &value) {
+bool forge_DHT_success(socket_t socket, const Key &key, const Value &value) {
     size_t message_size = HEADER_SIZE + KEY_SIZE + value.size();
     Message message(message_size);
 
@@ -531,7 +819,7 @@ bool forge_DHT_RPC_ping(socket_t socket) {
 }
 
 bool handle_DHT_RPC_ping(const socket_t socket, const u_short body_size) {
-    const Message& message = connection_map[socket].received_bytes;
+    const Message& message = connection_map[socket].receive_bytes;
     Key rpc_id = read_rpc_header(message, connection_map[socket].client_addr);
     forge_DHT_RPC_ping_reply(socket, rpc_id);
     return true;
@@ -543,7 +831,7 @@ bool forge_DHT_RPC_ping_reply(socket_t socket, Key rpc_id) {
 
 // TODO: following functions even necessary? Should answers be waited upon in the respective switch-cases?
 bool handle_DHT_RPC_ping_reply(const socket_t socket, const u_short body_size) {
-    const Message& message = connection_map[socket].received_bytes;
+    const Message& message = connection_map[socket].receive_bytes;
     if (!check_rpc_id(message, connection_map[socket].rpc_id)) {
         return false;
     }
@@ -564,7 +852,7 @@ bool forge_DHT_RPC_store(socket_t socket, u_short time_to_live, int replication,
 
     u_short network_order_TTL = htons(time_to_live);
     write_body(message, RPC_SUB_HEADER_SIZE, reinterpret_cast<unsigned char*>(&network_order_TTL), 2);
-    auto replication_data = static_cast<unsigned char>(replication & 0xFF);
+    unsigned char replication_data = static_cast<unsigned char>(replication & 0xFF);
     write_body(message, RPC_SUB_HEADER_SIZE + 2, &replication_data, 1);
     write_body(message, RPC_SUB_HEADER_SIZE + 4, key.data(), KEY_SIZE);
     write_body(message, RPC_SUB_HEADER_SIZE + 4 + KEY_SIZE, value.data(), value.size());
@@ -576,7 +864,7 @@ bool handle_DHT_RPC_store(const socket_t socket, const u_short body_size) {
     if (body_size <= RPC_SUB_HEADER_SIZE + 4 + KEY_SIZE) {
         return false;
     }
-    const Message& message = connection_map[socket].received_bytes;
+    const Message& message = connection_map[socket].receive_bytes;
     int value_size = body_size - (RPC_SUB_HEADER_SIZE + 4 + KEY_SIZE);
 
     Key rpc_id = read_rpc_header(message, connection_map[socket].client_addr);
@@ -622,7 +910,7 @@ bool handle_DHT_RPC_store_reply(const socket_t socket, const u_short body_size) 
     if (body_size <= RPC_SUB_HEADER_SIZE + KEY_SIZE) {
         return false;
     }
-    const Message& message = connection_map[socket].received_bytes;
+    const Message& message = connection_map[socket].receive_bytes;
     if (!check_rpc_id(message, connection_map[socket].rpc_id)) {
         return false;
     }
@@ -651,7 +939,7 @@ bool handle_DHT_RPC_find_node(const socket_t socket, const u_short body_size) {
     if (body_size != RPC_SUB_HEADER_SIZE + NODE_ID_SIZE) {
         return false;
     }
-    const Message& message = connection_map[socket].received_bytes;
+    const Message& message = connection_map[socket].receive_bytes;
 
     Key rpc_id = read_rpc_header(message, connection_map[socket].client_addr);
 
@@ -691,7 +979,7 @@ bool handle_DHT_RPC_find_node_reply(const socket_t socket, const u_short body_si
     }
     int num_nodes = (body_size - RPC_SUB_HEADER_SIZE) / NODE_SIZE;
 
-    const Message& message = connection_map[socket].received_bytes;
+    const Message& message = connection_map[socket].receive_bytes;
     if (!check_rpc_id(message, connection_map[socket].rpc_id)) {
         return false;
     }
@@ -747,15 +1035,15 @@ bool handle_DHT_RPC_find_value(const socket_t socket, const u_short body_size) {
     if (body_size != RPC_SUB_HEADER_SIZE + KEY_SIZE) {
         return false;
     }
-    const Message &message = connection_map[socket].received_bytes;
+    const Message &message = connection_map[socket].receive_bytes;
 
     Key rpc_id = read_rpc_header(message, connection_map[socket].client_addr);
     Key key;
     read_body(message, RPC_SUB_HEADER_SIZE, key.data(), KEY_SIZE);
 
-    auto opt_val = get_from_storage(key);
-    if (opt_val.has_value()) {
-        return forge_DHT_RPC_find_value_reply(socket, rpc_id, key, opt_val.value());
+    auto val_ptr = get_from_storage(key);
+    if (val_ptr) {
+        return forge_DHT_RPC_find_value_reply(socket, rpc_id, key, *val_ptr);
     } else {
         // TODO: What if we're closest and don't have value -> return FAILURE
         auto closest_nodes = routing_table.find_closest_nodes(key);
@@ -763,7 +1051,7 @@ bool handle_DHT_RPC_find_value(const socket_t socket, const u_short body_size) {
     }
 }
 
-bool forge_DHT_RPC_find_value_reply(socket_t socket, Key rpc_id, Key &key, Value &value) {
+bool forge_DHT_RPC_find_value_reply(socket_t socket, Key rpc_id, const Key &key, const Value &value) {
     u_short message_type = DHT_RPC_FIND_VALUE_REPLY;
     size_t body_size = RPC_SUB_HEADER_SIZE + KEY_SIZE + value.size();
     size_t message_size = HEADER_SIZE + body_size;
@@ -783,7 +1071,7 @@ bool handle_DHT_RPC_find_value_reply(const socket_t socket, const u_short body_s
         return false;
     }
     const int value_size = body_size - (RPC_SUB_HEADER_SIZE + KEY_SIZE);
-    const Message& message = connection_map[socket].received_bytes;
+    const Message& message = connection_map[socket].receive_bytes;
 
     if (!check_rpc_id(message, connection_map[socket].rpc_id)) {
         return false;
@@ -814,7 +1102,7 @@ bool handle_DHT_error(const socket_t socket, const u_short body_size) {
 // Message Parsing
 
 bool parse_header(const ConnectionInfo &connection_info, u_short &message_size, u_short &dht_type){
-    const Message &connection_buffer = connection_info.received_bytes;
+    const Message &connection_buffer = connection_info.receive_bytes;
     message_size = 0;
     dht_type = 0;
 
@@ -909,7 +1197,7 @@ bool parse_P2P_request(socket_t socket, const u_short body_size, const P2PType p
 ProcessingStatus try_processing(socket_t curfd){
     //retreive information for element to process:
     ConnectionInfo &connection_info = connection_map.at(curfd);
-    auto &connection_buffer = connection_info.received_bytes;
+    auto &connection_buffer = connection_info.receive_bytes;
     size_t byteCountToProcess = connection_buffer.size();
     if(connection_buffer.size() == 0){
         /* i.e.: we got work to process (epoll event happened), the message buffer
@@ -975,27 +1263,86 @@ ProcessingStatus try_processing(socket_t curfd){
 }
 
 
-void accept_new_connection(int epollfd, std::vector<epoll_event>::value_type cur_event, ConnectionType connection_type) {
+void accept_new_connection(int epollfd, epoll_event &cur_event, ConnectionType connection_type) {
     sockaddr_in6 client_addr{};
     socklen_t client_addr_len = sizeof(client_addr);
-    socket_t socket = accept4(cur_event.data.fd, reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len, SOCK_NONBLOCK);
-    if (socket == -1) {
-        std::cerr << "Accept error: " << strerror(errno) << std::endl;
+    socket_t socketfd = accept4(cur_event.data.fd, reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len, SOCK_NONBLOCK);
+    if (socketfd == -1) {
+        std::cerr << "Socket accept error: " << strerror(errno) << std::endl;
         return;
     }
-    u_short client_port = ntohs(client_addr.sin6_port);
-    std::cout << "Accepted connection from " << ip_to_string(client_addr.sin6_addr) << ":" << client_port << std::endl;
 
+    ConnectionInfo connection_info{};
+    u_short client_port = ntohs(client_addr.sin6_port);
+
+    connection_info.connection_type = connection_type;
+    connection_info.role = ConnectionRole::SERVER; //We are accepting, so we are server.
+    connection_info.client_addr = client_addr.sin6_addr;
+    connection_info.client_port = client_port;
+    
+
+    #ifdef VERBOSE
+    std::cout << "Accepted socket connection from " << ip_to_string(client_addr.sin6_addr) << ":" << client_port << std::endl;
+    #endif
+
+
+    if(connection_type == ConnectionType::P2P){
+        
+        #ifdef VERBOSE
+        std::cout << "Setting up SSL for incoming client connection (we are server)" << std::endl; 
+        #endif
+
+        SSL* ssl = SSL_new(SSLConfig::server_ctx);
+        connection_info.ssl = ssl;
+        
+        if(!ssl){
+            std::cerr << "Failure Server: SSL object null pointer" << std::endl;
+            return;
+        }
+        SSL_set_fd(ssl, socketfd);
+
+        #ifdef VERBOSE
+        SSLUtils::check_ssl_blocking_mode(ssl);
+        #endif
+
+        #ifdef VERBOSE
+        std::cout << "Supplying length-prefixed Server-Certificate over insecure TCP channel" << std::endl;
+        #endif
+
+        connection_info.ssl_stat = SSLStatus::HANDSHAKE_SERVER_WRITE_CERT;
+        
+        //Always write to internal buffer. Do not give up control by directly writing out socketfd.
+        write_charptr_to_sendbuf(connection_info,SSLConfig::length_prefixed_cert_str,SSLConfig::cert_len);
+
+        //Transmit certificate unencrypted/ unauthenticated. Plaintext.
+        auto [is_socket_still_up, everything_was_sent] = flush_sendbuf(socketfd,connection_info,epollfd);
+        if(!is_socket_still_up){
+            //Connection got torn down due to error(s) on certificate transmission. Abort accepting.
+            return;
+        }
+        if(everything_was_sent){
+            connection_info.ssl_stat = SSLUtils::try_ssl_accept(ssl);
+            if(connection_info.ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
+                std::cerr << "Fatal error occured on SSL accept. TCP connection was closed." << std::endl;
+                SSL_free(ssl);
+                close(socketfd);
+                return;
+            }
+        }
+    }
+
+    //SSL accept was either successful or is pending (aka. we need to give the client more time).
+    //Pending means, the client needs to read/write more data from/to our socket.
+    //Proceed normally, but before transmitting future data, check for ssl status.
     auto epollEvent = epoll_event{};
     epollEvent.events = EPOLLIN | EPOLLOUT | EPOLLERR;
-    epollEvent.data.fd = socket;
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, socket, &epollEvent);
-    connection_map.insert_or_assign(socket, ConnectionInfo{connection_type, client_addr.sin6_addr, client_port});
+    epollEvent.data.fd = socketfd;
+    epoll_ctl(epollfd, EPOLL_CTL_ADD, socketfd, &epollEvent);
+    connection_map.insert_or_assign(socketfd, connection_info);
 }
 
 
-
-void handle_EPOLLOUT(auto epollfd, socket_t notifying_socket){
+void handle_EPOLLOUT(int epollfd, socket_t notifying_socket){
     ConnectionInfo connection_info = connection_map.at(notifying_socket);
     if(connection_info.send_bytes.size() == 0){
         epoll_event event{};
@@ -1005,70 +1352,112 @@ void handle_EPOLLOUT(auto epollfd, socket_t notifying_socket){
         return;
     }
 
-    if(connection_info.sent_bytes < connection_info.send_bytes.size()){
-        //Not all bytes were sent in a previous attemt to write the full message to the socket
-
-        int written_bytes = write(notifying_socket,
-                                    &(connection_info.send_bytes.at(connection_info.sent_bytes)),
-                                    connection_info.send_bytes.size() - connection_info.sent_bytes);
-
-        if(written_bytes == -1 && errno == EWOULDBLOCK){
-            //Wait for new EPOLLOUT event. Buffer was full. This is considered a dead branch... Should not happen.
-            std::cout << "Reached a considered dead branch. in handle_EPOLLOUT(epollfd,notifying_socket)" << std::endl;
-            return;
-        }
-        else if (written_bytes == -1){
-            //Faulty connection. Remove relayTos, then remove it.
-            std::cout << "Faulty connection detected while trying to send data. Closed it and all relayTo connections." << std::endl;
-            if(connection_info.relay_to != -1) {
-                auto relay_to_socket = connection_info.relay_to;
-                epoll_ctl(epollfd,EPOLL_CTL_DEL,relay_to_socket,nullptr);
-                close(relay_to_socket);
-            }
-            epoll_ctl(epollfd,EPOLL_CTL_DEL,notifying_socket,nullptr);
-            close(notifying_socket);
-            return;
-        }
-
-        assert(written_bytes > 0);
-
-        connection_info.sent_bytes += written_bytes;
-        //TODO: Unset the relayto field as soon as all answers have arrived (referring to concurrent lookups) (receiving event)
-
-        //TODO: Check if i am initiator, if yes, keep connection open (wait for receiving). Otherwise, close connection (I was waiting, so i have received what i waited for).
-
-    } else{
-        //all bytes were sent. Nothing to do except for performing a hard-reset to default sent-fields.
-        connection_info.send_bytes.clear();
-        connection_info.sent_bytes = 0;
-
-        epoll_event event{};
-        event.events = EPOLLIN;
-        event.data.fd = notifying_socket;
-        epoll_ctl(epollfd, EPOLL_CTL_MOD, notifying_socket, &event);
-    }
+    //TODO:
+    
 }
 
-void remove_client(auto epollfd, int curfd) {
+void remove_client(int epollfd, int curfd) {
     epoll_ctl(epollfd, EPOLL_CTL_DEL, curfd, nullptr);
     close(curfd);
     connection_map.erase(curfd);
 }
 
-bool handle_EPOLLIN(auto epollfd, epoll_event current_event){
+bool handle_EPOLLIN(int epollfd, epoll_event current_event){
+    socket_t socketfd = current_event.data.fd;
+    if (!connection_map.contains(socketfd)) {
+        //Should never happen.
+        tear_down_connection(main_epollfd, socketfd);
+        return false;
+    }
+    ConnectionInfo &connection_info = connection_map.at(socketfd);
+
+    if(connection_info.connection_type == ConnectionType::MODULE_API){
+        //TODO: loop read into recv buf.
+
+        return true; //Return early to distinguish from following ConnectionType::P2P
+    }
+
+    //Two large switches:
+    //First: Event on the Server part of an SSL connection: Acts adhearing to protocol, and progresses SSLState. Final Goal: ACCEPTED.
+    //
+    if(connection_info.role == ConnectionRole::SERVER){
+        
+        auto [is_socket_still_up, everything_was_sent] = std::make_tuple(true, false);
+        switch (connection_info.ssl_stat)
+        {
+            //Server still needs to finish SSL handshake for the next few cases:
+
+
+            case SSLStatus::HANDSHAKE_SERVER_WRITE_CERT:
+                //length prefixed ssl certificate is buffered since accept_new_connection. Simply flush it    
+                std::tie(is_socket_still_up, everything_was_sent) = flush_sendbuf(socketfd,connection_info,epollfd);
+                if(!is_socket_still_up){
+                    //Connection got torn down due to error(s) on certificate transmission. Abort accepting.
+                    return false;
+                }
+                if(everything_was_sent){
+                    connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
+                    if(connection_info.ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
+                        tear_down_connection(epollfd,socketfd);
+                        return false;
+                    }
+                    //We retried ssl_accept, but this time we guaranteed progressed ssl_stat to at least AWAITING_ACCEPT
+                    return true;
+                }
+                return true;
+            case SSLStatus::AWAITING_ACCEPT:
+                connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
+                return true;
+            case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
+                tear_down_connection(epollfd,socketfd);
+                return false;
+
+            //Server as already finished handshake (SSLStatus::ACCEPTED)->
+            default:
+                break;
+        }
+        //If we exit out of the switch (i.e. without returning), our event occured on a perfectly fine SSL-using connection.
+        //Skip after the next large else case to proceed with normal socket input handeling. :)
+    }
+    else{
+        bool is_socket_still_up{};
+        switch (connection_info.ssl_stat)
+        {
+            //Client still needs to finish SSL handshake for the next few cases
+
+            case SSLStatus::HANDSHAKE_CLIENT_READ_CERT:
+                //length prefixed ssl certificate is buffered on serverside since accept_new_connection. Simply read flush it    
+                is_socket_still_up = flush_recvbuf(socketfd,connection_info,epollfd);
+                if(!is_socket_still_up){
+                    //Connection got torn down due to error(s) on certificate reception. Abort connecting.
+                    return false;
+                }
+
+                //TODO: Perform heavy lifting (certificate validation, persistent storage)
+                return true;
+            case SSLStatus::AWAITING_CONNECT:
+                connection_info.ssl_stat = SSLUtils::try_ssl_connect(connection_info.ssl);
+                return true;
+            case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
+                tear_down_connection(epollfd,socketfd);
+                return false;
+            //Client as already finished handshake (SSLStatus::CONNECTED)->
+            default:
+                break;
+        }
+
+    }
+    
     std::cout << "Received new request." << std::endl;
     std::array<unsigned char, 4096> recv_buf{};
     int bytes_read_this_time = 0;
-    auto curfd = current_event.data.fd;
-    if (!connection_map.contains(curfd)) {
-        connection_map.insert_or_assign(curfd, ConnectionInfo{});
-    }
-    auto &connection_buffer = connection_map.at(curfd).received_bytes;
+    
+    auto &connection_buffer = connection_map.at(socketfd).receive_bytes;
     while (true) {
         // This loop is used in order to pull all bytes that
         // reside already on this machine in the kernel socket buffer.
         // once this exausts, we try processing.
-        auto bytes_read = read(curfd, recv_buf.data(), recv_buf.size());
+        auto bytes_read = read(socketfd, recv_buf.data(), recv_buf.size());
         bytes_read_this_time += bytes_read;
 
         // If read -> 0: Partner has closed
@@ -1078,20 +1467,20 @@ bool handle_EPOLLIN(auto epollfd, epoll_event current_event){
         // (probably expects an answer -> try processing)
         if ( bytes_read == 0 && bytes_read_this_time != 0 ||
             (bytes_read == -1 && errno == EWOULDBLOCK) ) {
-            ProcessingStatus processing_status = try_processing(curfd);
+            ProcessingStatus processing_status = try_processing(socketfd);
             std::cout << "Processing finished: " << processing_status
                     << std::endl;
             if (processing_status == ProcessingStatus::ERROR) {
                 std::cerr << "Had error with processing. Closing channel to e.g. unreachable peer." << std::endl;
-                remove_client(epollfd, curfd);
+                remove_client(epollfd, socketfd);
                 return false;
             } else if (processing_status == ProcessingStatus::PROCESSED_AND_CLOSE) {
-                remove_client(epollfd, curfd);
+                remove_client(epollfd, socketfd);
                 return false;
             }
             return true;
         } else if (bytes_read_this_time == 0 || bytes_read == -1 ) {
-            remove_client(epollfd, curfd);
+            remove_client(epollfd, socketfd);
             return false;
         }
         connection_buffer.insert(connection_buffer.end(), recv_buf.begin(),
@@ -1124,14 +1513,14 @@ socket_t setup_server_socket(u_short port) {
     sock_addr.sin6_family = AF_INET6;
     sock_addr.sin6_port = htons(port);
     sock_addr.sin6_addr = in6addr_any;
-    if (bind(serversocket, reinterpret_cast<sockaddr *>(&sock_addr),sizeof(sock_addr)) != 0) {
+    if (bind(serversocket, reinterpret_cast<sockaddr *>(&sock_addr),sizeof(sock_addr)) < 0) {
         std::cerr << "Failed to bind port " << port << ". Try to pass a different port." << std::endl;
     }
     listen(serversocket, 128);
     return serversocket;
 }
 
-socket_t setup_connect_socket(const in6_addr& address, u_short port, const ConnectionInfo &connection_info) {
+socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t port, const ConnectionType connection_type) {
     socket_t peer_socket = socket(AF_INET6, SOCK_STREAM, 0);
     if (peer_socket == -1) {
         std::cerr << "Failed to create client socket on port " << port << "." << std::endl;
@@ -1146,11 +1535,22 @@ socket_t setup_connect_socket(const in6_addr& address, u_short port, const Conne
     static constexpr int ONE = 1;
     setsockopt(peer_socket, SOL_SOCKET, SO_KEEPALIVE, &ONE, sizeof(ONE));
 
+    ConnectionInfo connection_info{};
+    connection_info.connection_type = connection_type;
+    connection_info.role = ConnectionRole::CLIENT;
+    connection_info.client_addr = address;
+    connection_info.client_port = addr.sin6_port;
+
     if (connect(peer_socket, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == -1) {
         std::cerr << "Couldn't connect to peer." << std::endl;
         close(peer_socket);
         return -1;
     }
+    #ifdef VERBOSE
+    std::cout << "Connected socket to " << ip_to_string(connection_info.client_addr) << ":" << connection_info.client_port << std::endl;
+    #endif
+
+
 
     int flags = fcntl(peer_socket, F_GETFL, 0);
     if (!(flags & O_NONBLOCK)) {
@@ -1159,9 +1559,194 @@ socket_t setup_connect_socket(const in6_addr& address, u_short port, const Conne
     fcntl(peer_socket, F_SETFL, flags);
 
     connection_map[peer_socket] = connection_info;
+    auto &connection_info_emplaced = connection_map[peer_socket];
+
+    //Inject SSL-Code.
+    if(connection_type == ConnectionType::P2P){
+        #ifdef VERBOSE
+        std::cout << "Setting up SSL for outgoing client connection (we are client)" << std::endl; 
+        #endif
+
+        SSL* ssl = SSL_new(SSLConfig::client_ctx);
+        connection_info_emplaced.ssl = ssl;
+        connection_info_emplaced.ssl_stat = SSLStatus::HANDSHAKE_CLIENT_READ_CERT;
+
+        if(!ssl){
+            std::cerr << "Failure Client: SSL object null pointer" << std::endl;
+            tear_down_connection(epollfd,peer_socket);
+            return -1;
+        }
+        SSL_set_fd(ssl, peer_socket);
+
+        #ifdef VERBOSE
+        SSLUtils::check_ssl_blocking_mode(ssl);
+        #endif
+
+        #ifdef VERBOSE
+        std::cout << "Receiving length-prefixed Server-Certificate over insecure TCP channel" << std::endl;
+        #endif
+
+
+        unsigned char * foreign_cert_str = nullptr;
+        uint32_t cert_len{0};
+        //Do heavy lifting certificate storage logic
+        bool socket_still_alive = receive_prefixed_sendbuf_in_charptr(epollfd, peer_socket, connection_info_emplaced, foreign_cert_str, cert_len);
+        if(!socket_still_alive){
+            tear_down_connection(epollfd,peer_socket);
+            return -1;
+        }
+        if(!foreign_cert_str){
+            return peer_socket;
+        }
+
+        X509 * foreign_certificate = SSLUtils::load_cert_from_char(foreign_cert_str,cert_len);
+        free(foreign_cert_str);
+
+
+        //Save foreign cert str
+        unsigned char received_id[KEY_SIZE];
+        if(!SSLUtils::extract_custom_id(foreign_certificate,received_id)){
+            std::cerr << "Failed to extract IPv6 from certificate." << std::endl;
+        }
+
+        
+        std::string hex_id = Utils::bin_to_hex(received_id, KEY_SIZE);
+        #ifdef VERBOSE
+        std::cout << "Hex ID received in certificate is:" << hex_id << std::endl;
+        #endif
+
+        std::string ipv6_str{};
+        if(!SSLUtils::extract_ipv6_from_cert(foreign_certificate,ipv6_str)){
+            std::cerr << "Failed to extract IPv6 from certificate." << std::endl;
+        }
+        if (SSLConfig::cert_map.find(hex_id) != SSLConfig::cert_map.end()) {
+            std::cout << "Certificate already recognized." << std::endl;
+            //TODO compare certificates
+            //Reject, if not matching and original peer is still reachable. --> RPC_Ping.
+        }
+        else{
+            // Add the new certificate to the map
+            BIO *bio = BIO_new(BIO_s_mem());
+            PEM_write_bio_X509(bio, foreign_certificate);
+            int cert_len = BIO_pending(bio);
+            char* cert_pem = (char*)malloc(cert_len + 1);
+            BIO_read(bio, cert_pem, cert_len);
+            cert_pem[cert_len] = '\0';
+            BIO_free(bio);
+
+            SSLConfig::cert_map[hex_id] = std::pair{addr.sin6_port,std::string(cert_pem)};
+            free(cert_pem);
+        }
+        
+        if (X509_STORE_add_cert(SSLConfig::client_cert_store, foreign_certificate) != 1) {
+            std::cerr << "Failed to add certificate to trusted store." << std::endl;
+            // Handle error or exit as needed
+        }
+
+        SSLStatus ssl_stat = SSLUtils::try_ssl_connect(ssl);
+        connection_info_emplaced.ssl_stat = ssl_stat;
+        if (ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT) {
+            tear_down_connection(epollfd,peer_socket);
+            return -1;
+        }
+    }
+    
     return peer_socket;
 }
 
+//SSL functions:
+
+void prepare_SSL_Config(in_port_t host_p2p_port){
+    
+    SSLConfig::id = routing_table.get_local_node().id;
+
+    //Create certificate map file. File name is "cert_map_s_<P2PPort>.txt".
+    //This way, no race condition to file names, as the ports are unique.
+    std::string port_string = std::to_string(host_p2p_port);
+    SSLConfig::certmap_filename = "cert_map_s_" + port_string + ".txt";
+    SSLConfig::cert_map = CertUtils::load_certificate_map(SSLConfig::certmap_filename);
+
+    //1. Init SSL library
+    SSL_load_error_strings();
+    OpenSSL_add_ssl_algorithms();
+    
+    //Generate Key-pair for signing certificates and DHKE
+    SSLConfig::pkey = KeyUtils::generate_rsa_key();
+    if (!SSLConfig::pkey) {
+        std::cerr << "Failed to generate RSA key pair" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    #ifdef VERBOSE
+    std::cout << "Generated Kademlia-ID as hex: ";
+    Utils::print_hex(SSLConfig::id.data(), 32);
+    #endif
+
+    //Retrieve own IPv6 ip to include in certificate:
+
+    if(!NetworkUtils::getIPv6(SSLConfig::ipv6_buf,sizeof(SSLConfig::ipv6_buf))){
+        std::cerr << "Failed to retrieve own IPv6 address" << std::endl;
+        EVP_PKEY_free(SSLConfig::pkey);
+        exit(EXIT_FAILURE);
+    }
+
+    //Generate self-signed certificate
+
+    SSLConfig::cert = CertUtils::create_self_signed_cert(SSLConfig::pkey, SSLConfig::ipv6_buf,reinterpret_cast<const char*>(SSLConfig::id.data()));
+    if(!SSLConfig::cert){
+        std::cerr << "Failed to generate self-signed X509 certificate" << std::endl;
+        EVP_PKEY_free(SSLConfig::pkey);
+        exit(EXIT_FAILURE);
+    }
+    
+
+    BIO *bio = BIO_new(BIO_s_mem());
+    PEM_write_bio_X509(bio, SSLConfig::cert);
+    int cert_len = BIO_pending(bio);
+    uint32_t net_length = htonl(cert_len);  // Convert length to network byte order
+
+    //Allocate [<lengthprefix><certificate>] bytes.    [ ] <-- describes the extent of malloc.
+    SSLConfig::length_prefixed_cert_str = (unsigned char*)malloc(sizeof(net_length) + cert_len);
+
+    //Save the <lengthprefix>
+    std::memcpy(SSLConfig::length_prefixed_cert_str, &net_length, sizeof(net_length));
+
+    //Save the <certificate> after the <lengthprefix>
+    BIO_read(bio, SSLConfig::length_prefixed_cert_str + sizeof(net_length), cert_len);
+    BIO_free(bio);
+
+    // Save the private key and certificate to files
+    KeyUtils::save_private_key(SSLConfig::pkey, "private_key_" + port_string + ".pem");
+    KeyUtils::save_public_key(SSLConfig::pkey, "public_key_" + port_string + ".pem"); //Optional, could be derived
+    CertUtils::save_certificate(SSLConfig::cert, "certificate_" + port_string + ".pem");
+
+    //Setup SSL context (globally)
+    SSLConfig::server_ctx = SSLUtils::create_context(true);
+    SSL_CTX_use_certificate(SSLConfig::server_ctx, SSLConfig::cert);
+    SSL_CTX_use_PrivateKey(SSLConfig::server_ctx, SSLConfig::pkey);
+
+    SSLConfig::client_ctx = SSLUtils::create_context(false);
+    SSLConfig::client_cert_store = SSL_CTX_get_cert_store(SSLConfig::client_ctx);
+
+}
+
+void clean_up_SSL_Config(){
+    //Ordered clean up according to namespace SSLConfig.
+    EVP_PKEY_free(SSLConfig::pkey);
+    X509_free(SSLConfig::cert);
+    free(SSLConfig::length_prefixed_cert_str);
+    SSL_CTX_free(SSLConfig::server_ctx);
+    SSL_CTX_free(SSLConfig::client_ctx);
+
+}
+
+
+void sig_c_handler(int signal){
+    if(signal == SIGINT){
+        clean_up_SSL_Config();
+        exit(0);
+    }
+}
 
 #ifndef TESTING
     int main(int argc, char const *argv[])
@@ -1289,11 +1874,13 @@ socket_t setup_connect_socket(const in6_addr& address, u_short port, const Conne
 
 
     routing_table = RoutingTable(host_address, host_p2p_port);
+    
 
 
 
     // Ignore SIGPIPE (if socket gets closed by remote peer, we might accidentally write to a broken pipe)
     signal(SIGPIPE, SIG_IGN);
+    std::signal(SIGINT,sig_c_handler);
 
     // Open port for local API traffic from modules
     socket_t module_api_socket = setup_server_socket(host_module_port);
@@ -1308,13 +1895,18 @@ socket_t setup_connect_socket(const in6_addr& address, u_short port, const Conne
         return 1;
     }
 
+    //Generate everything necessary for SSL. See ssl.cpp/ssl.h
+
+    prepare_SSL_Config(host_p2p_port);
+
+
     std::cout << "Server running... " << std::endl;
     bool server_is_running = true;
     if(connect_to_existing_network) {
         // TODO: connect to existing network
         // TODO: setup socket + add to connection_map, then call:
         std::cout << "Sending Find Node Request..." << std::endl;
-        socket_t peer_socket = setup_connect_socket(peer_address, peer_port, {ConnectionType::P2P});
+        socket_t peer_socket = setup_connect_socket(main_epollfd, peer_address, peer_port, ConnectionType::P2P);
 
         setup_epollin(main_epollfd, peer_socket);
         if (peer_socket == -1) {
@@ -1349,7 +1941,7 @@ socket_t setup_connect_socket(const in6_addr& address, u_short port, const Conne
             break;
         }
         for (int i = 0; i < event_count; ++i) {
-            auto current_event = epoll_events[i];
+            const epoll_event &current_event = epoll_events[i];
             if (current_event.data.fd == module_api_socket) {
                 accept_new_connection(main_epollfd, current_event, ConnectionType::MODULE_API);
             } else if (current_event.data.fd == p2p_socket) {
@@ -1362,8 +1954,7 @@ socket_t setup_connect_socket(const in6_addr& address, u_short port, const Conne
                 if (socket_still_valid && current_event.events & EPOLLOUT)
                     handle_EPOLLOUT(main_epollfd,current_event.data.fd);
                 if (socket_still_valid && current_event.events & EPOLLERR){
-                    epoll_ctl(main_epollfd, EPOLL_CTL_DEL, current_event.data.fd, nullptr);
-                    connection_map.erase(current_event.data.fd);
+                    tear_down_connection(main_epollfd,current_event.data.fd);
                 }
             }
         }
