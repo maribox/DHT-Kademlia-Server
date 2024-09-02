@@ -209,6 +209,9 @@ void RoutingTable::split_bucket(KBucket bucket, int depth) {
 //TODO: implement this. look at sections 2.2, 2.4, 4.2
 void RoutingTable::add_peer(const Node& peer) {
     // TODO: replace with function
+    if (peer == local_node) {
+        return;
+    }
     for (auto& bucket : bucket_list) {
         if (bucket.get_start() <= peer.id  && peer.id <= bucket.get_end()) {
         // according to 2.4: "When u learns of a new contact, it  attempts to insert the contact in the appropriate k-bucket.

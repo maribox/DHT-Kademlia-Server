@@ -298,8 +298,7 @@ std::pair<bool,bool> flush_write_connInfo_without_SSL(ConnectionInfo &connection
 
 //Returns <is_socket_still_up?,everything_was_sent?>
 std::pair<bool,bool> flush_sendbuf(socket_t socketfd, ConnectionInfo & connection_info, int epollfd){
-    auto &sendbuf = connection_info.send_bytes;
-    if(sendbuf.size() == 0){
+    if(send_buffer_empty(connection_info)){
         return {true,true};
     }
 
@@ -391,6 +390,7 @@ bool flush_read_connInfo_without_SSL(ConnectionInfo &connection_info, const int 
 //Flushes the kernel-side socket-buffer into the connection_info receive_bytes buffer.
 //Returns if the socket is still valid (connection is not torn down).
 bool flush_recvbuf(socket_t socketfd, ConnectionInfo & connection_info, int epollfd){
+
     if(connection_info.connection_type == ConnectionType::MODULE_API){
         // Easy flush, simply read without respecting SSL
         return flush_read_connInfo_without_SSL(connection_info, epollfd, socketfd);
@@ -993,6 +993,7 @@ bool handle_DHT_RPC_find_node(const socket_t socket, const u_short body_size) {
     // find the closest nodes, then return them:
     auto closest_nodes = routing_table.find_closest_nodes(target_node_id);
 
+    std::cout << "Found " << closest_nodes.size() << " nodes and returning them" << std::endl;
     return forge_DHT_RPC_find_node_reply(socket, main_epollfd, rpc_id, closest_nodes);
 }
 
@@ -1330,7 +1331,6 @@ ProcessingStatus try_processing(socket_t curfd){
     }
     if (byte_count_to_process > message_size) {
         connection_buffer.erase(connection_buffer.begin(), connection_buffer.begin() + message_size);
-        byte_count_to_process -= message_size;
         return MORE_TO_READ;
     }
     if (valid_request) {
@@ -1627,43 +1627,11 @@ bool read_EPOLLIN(int epollfd, const epoll_event& current_event){
         return true; //Return early to distinguish from following ConnectionType::P2P
     }
 
-    //Two large switches:
-    //First: Event on the Server part of an SSL connection: Acts adhearing to protocol, and progresses SSLState. Final Goal: ACCEPTED.
-    //
     if(!handle_custom_ssl_protocol(epollfd,socketfd,connection_info)){
         return false; //Socket was torn down by us.
     }
 
-    std::array<unsigned char, 4096> recv_buf{};
-    ssize_t total_bytes_read = 0;
-
-    auto &connection_buffer = connection_map.at(socketfd).receive_bytes;
-    while (true) {
-        // This loop is used in order to pull all bytes that
-        // reside already on this machine in the kernel socket buffer.
-        // once this exausts, we try processing.
-        auto bytes_read = read(socketfd, recv_buf.data(), recv_buf.size());
-        total_bytes_read += bytes_read;
-
-        // If read -> 0: Partner has closed
-        //      -> If we read data here, we need to process it
-        //      -> If we didn't read data here, that means we already processed what was sent last time we were here
-        // If read -> -1 && errno == EWOULDBLOCK: Partner has not closed but no more data
-        // (probably expects an answer -> try processing)
-        if ( bytes_read == 0 && total_bytes_read != 0 ||
-            (bytes_read == -1 && errno == EWOULDBLOCK) ) {
-                return true;
-            } else if (total_bytes_read == 0 || bytes_read == -1 ) {
-                if (bytes_read == -1) {
-                    std::cout << "When reading had error: " << strerror(errno) << std::endl;
-                }
-                return false;
-            }
-        connection_buffer.insert(connection_buffer.end(), recv_buf.begin(),
-                                    recv_buf.begin() + bytes_read);
-
-        //std::cout << std::string_view(reinterpret_cast<const char *>(recv_buf.data()), bytes_read) << "\n";
-    }
+    return flush_recvbuf(socketfd, connection_info, epollfd);
 }
 
 bool handle_EPOLLIN(int epollfd, const epoll_event& current_event) { // returns whether the socket is still valid and should be kept open
@@ -1678,10 +1646,8 @@ bool handle_EPOLLIN(int epollfd, const epoll_event& current_event) { // returns 
     ProcessingStatus processing_status;
     do {
         processing_status = try_processing(socketfd);
-        std::cout << "Processing finished: " << processing_status
-                << std::endl;
     } while (processing_status == MORE_TO_READ);
-    // TODO: Sometimes reading too much as value. Maybe race condition (look at python test module)
+    std::cout << "Processing finished: " << processing_status << std::endl;
     if (processing_status == ProcessingStatus::ERROR) {
         std::cerr << "Had error with processing. Closing channel to e.g. unreachable or misbehaving peer." << std::endl;
         tear_down_connection(epollfd, socketfd);
@@ -1814,7 +1780,7 @@ socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t po
         //New certificate saved or recognized previously trusted certificate.
         //Advance to at least SSLStatus::AWAITING_ACCEPT :)
 
-        connection_info_emplaced.ssl_stat = SSLUtils::try_ssl_connect(ssl);;
+        connection_info_emplaced.ssl_stat = SSLUtils::try_ssl_connect(ssl);
         if (connection_info_emplaced.ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT) {
             tear_down_connection(epollfd,peer_socket);
             return -1;
@@ -1911,7 +1877,7 @@ void clean_up_SSL_Config(){
 
 
 void sig_c_handler(int signal){
-    if(signal == SIGINT){
+    if(signal == SIGINT || signal == SIGTERM){
         clean_up_SSL_Config();
         exit(0);
     }
@@ -1977,7 +1943,6 @@ bool run_with_timeout(Function&& func, std::chrono::seconds timeout, Args&&... a
 }
 
 bool setup_tls_blocking(int epollfd) {
-    main_epollfd = epoll_create1(0);
     std::vector<epoll_event> epoll_events{64};
 
     while (true) {
@@ -2023,31 +1988,34 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
 
     int epollfd = epoll_create1(0);
     socket_t peer_socket = setup_connect_socket(peer_port, peer_address, epollfd);
+    set_socket_blocking(peer_socket, false);
     auto epollEvent = epoll_event{};
     epollEvent.events = EPOLLIN | EPOLLOUT | EPOLLERR;
     epollEvent.data.fd = peer_socket;
     epoll_ctl(epollfd, EPOLL_CTL_ADD, peer_socket, &epollEvent);
-    set_socket_blocking(peer_socket, false);
-    //std::chrono::seconds timeout(300);
-    //bool ssl_success = run_with_timeout(handle_custom_ssl_protocol, timeout, epollfd, peer_socket, std::ref(connection_map[peer_socket]));
-
     bool ssl_success = setup_tls_blocking(epollfd);
-
 
     if (peer_socket == -1 || epollfd == -1 || !ssl_success) {
         std::cerr << "Error creating socket. Aborting." << std::endl;
         return false;
     }
-    std::vector<epoll_event> epoll_events{64};
 
     std::cout << "Sending Find Node Request..." << std::endl;
     if (!forge_DHT_RPC_find_node(peer_socket, epollfd, routing_table.get_local_node().id)) {
         std::cerr << "Couldn't send Find Node Request during bootstrap from " << peer_address_string << ":" << peer_port << std::endl;
     }
+
+    std::vector<epoll_event> epoll_events{64};
+    // manually send forge
+    flush_sendbuf(peer_socket, connection_map[peer_socket], epollfd);
     int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), 5000);
     if (event_count != -1) {
         for (int i = 0; i < event_count; i++) {
-            if (epoll_events[i].events & EPOLLIN) {
+            bool still_valid = true;
+            if  (epoll_events[i].events & EPOLLOUT) {
+                still_valid = handle_EPOLLOUT(epollfd, epoll_events[i]);
+            }
+            if  (still_valid && epoll_events[i].events & EPOLLIN) {
                 if (!read_EPOLLIN(epollfd, epoll_events[i])) {
                     std::cerr << "Didn't receive response during bootstrap from " << peer_address_string << ":" << peer_port << std::endl;
                     return false;
@@ -2060,6 +2028,7 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
                 if (parse_header(connection_info, message_size, dht_type) &&
                     dht_type == P2PType::DHT_RPC_FIND_NODE_REPLY) {
                     if (handle_DHT_RPC_find_node_reply(sockfd, message_size - HEADER_SIZE)) {
+                        std::cerr << "baum" <<  (epoll_events[i].events & EPOLLOUT) << std::endl;
                         break;
                     } else {
                         std::cerr << "Received invalid find node reply during bootstrap from " << peer_address_string << ":" << peer_port << std::endl;
@@ -2068,12 +2037,13 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
                     }
                 }
                 std::cerr << "Received unexpected/invalid response during bootstrap from " << peer_address_string << ":" << peer_port << std::endl;
+                std::cerr << "Message size: " << message_size << " and dht type: " << dht_type << std::endl;
+                std::cerr << (epoll_events[i].events & EPOLLOUT) << std::endl;
                 return false;
-            } else if (epoll_events[i].events & EPOLLOUT) {
-                handle_EPOLLOUT(epollfd, epoll_events[i]);
-            } else {
-                std::cerr << "Epoll wasn't EPOLLIN" << std::endl;
             }
+            /*else {
+                std::cerr << "Invalid event triggered" << std::endl;
+            }*/
         }
     } else {
         std::cerr << "Expected response from peer " << peer_address_string << ":" << peer_port << " but didn't get a valid one." << std::endl;
@@ -2228,6 +2198,7 @@ int main(int argc, char const *argv[])
     // Ignore SIGPIPE (if socket gets closed by remote peer, we might accidentally write to a broken pipe)
     signal(SIGPIPE, SIG_IGN);
     std::signal(SIGINT,sig_c_handler);
+    std::signal(SIGTERM,sig_c_handler);
 
     // Open port for local API traffic from modules
     socket_t module_api_socket = setup_server_socket(host_module_port);

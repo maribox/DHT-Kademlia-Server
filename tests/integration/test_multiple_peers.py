@@ -46,7 +46,7 @@ def stream_output(process, prefix, lock):
 
 host_ip = get_local_ip()
 base_module_port = 7401
-base_p2p_port = 7402
+base_p2p_port = 7404
 n_peers = 0
 program_path = "../../cmake-build-debug/dht_server"
 
@@ -67,7 +67,9 @@ print("----------------")
 s = dht_client.get_socket(host_ip, base_module_port)
 print("[+] Custom operation: Connected to server")
 dht_client.send_put(s, dht_client.dht_key, dht_client.dht_value)
-s = dht_client.get_socket(host_ip, base_module_port)
+s = dht_client.get_socket(host_ip, base_module_port + 2)
+dht_client.send_get(s, dht_client.dht_key)
+exit()
 dht_client.send_get(s, dht_client.dht_key)
 dht_client.send_get(s, dht_client.dht_key)
 dht_client.send_get(s, dht_client.dht_key)
