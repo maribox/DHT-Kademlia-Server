@@ -438,6 +438,13 @@ SSL_CTX* SSLUtils::create_context(bool am_i_server) {
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
     }
+    if(!am_i_server){
+        SSL_CTX_set_verify(ctx,SSL_VERIFY_PEER,nullptr); //nullptr callback function --> default verification is used.
+    }
+
+    SSL_CTX_set_security_level(ctx,2); //Somewhat high security level. Very old clients may not support this level. :c
+    SSL_CTX_set_min_proto_version(ctx,TLS1_3_VERSION); //Newest standard, most security.
+    SSL_CTX_set_max_proto_version(ctx,TLS1_3_VERSION);
 
     return ctx;
 }

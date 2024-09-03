@@ -185,6 +185,28 @@ void read_vector_from_recvbuf(ConnectionInfo &connection_info, Message &to_recv)
     read_buf.clear();
 }
 
+//Returns the number of deleted elements.
+size_t purge_local_storage(){
+        while(true){
+        {
+            {
+                std::lock_guard<std::mutex> lock (storage_lock);
+                    auto time_to_purge = std::chrono::system_clock::now();
+                    for(auto &[key,time_value_pair] : local_storage){
+                        auto &[time,value] = time_value_pair;
+                        if(time >= time_to_purge){
+                            continue;
+                        }
+                        local_storage.erase(key);
+                    }
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(MIN_LIFETIME_SEC/2));
+        }
+    }
+}
+
+
+
 
 
 // SSL
@@ -441,7 +463,6 @@ bool receive_prefixed_sendbuf_in_charptr(const int epollfd, const socket_t socke
 // Returns optional value, either the correctly looked up value, or no value.
 Value* get_from_storage(const Key &key)
 {
-    std::lock_guard<std::mutex> lock(storage_lock);
     auto it = local_storage.find(key);
     // We could also perform kademlia tree index checks here.
     if(it == local_storage.end()){ //Log look-up hit, but maybe outdated.
@@ -449,8 +470,7 @@ Value* get_from_storage(const Key &key)
     }
     auto& [ttl,value] = it->second;
     if (ttl < std::chrono::system_clock::now()){
-        local_storage.erase(it);
-        return nullptr; // Log lookup-miss.
+        return nullptr; // Log lookup-miss. //Will be purged automatically every 90s.
     }
     return &value; // Log lookup-hit.
 }
@@ -1464,14 +1484,14 @@ CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socke
     }
     if (SSLConfig::cert_map.find(hex_id) != SSLConfig::cert_map.end()) {
         std::cout << "Kademlia ID already recognized." << std::endl;
-        //TODO compare certificates
-        if(true){
+        //Compare certificates
+        if(SSLUtils::compare_x509_cert_with_pem(foreign_certificate, SSLConfig::cert_map.find(hex_id)->second.second)){
             //Compare yielded equality:
             return CertificateStatus::EXPECTED_CERTIFICATE;
         }else{
             //Compare yielded difference. --> RPC_Ping old connection partner
             //TODO: Maybe leave out because of time reasons. For now, assume that peer is not reachable
-            //return CertificateStatus::NEW_VALID_CERTIFICATE;
+            return CertificateStatus::KNOWN_CERTIFICATE_CONTENT_MISMATCH;
         }
     }
     
@@ -2222,6 +2242,11 @@ int main(int argc, char const *argv[])
             return -1;
         }
     }
+
+    //Start to periodically purge local_storage:
+
+    std::thread purger(purge_local_storage);
+
 
     // event loop
 
