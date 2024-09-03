@@ -294,6 +294,7 @@ std::pair<bool,bool> flush_write_connInfo_without_SSL(ConnectionInfo &connection
 
     do{
         bytes_flushed = write(socketfd,sendbuf.data(),sendbuf.size());
+        std::cout << bytes_flushed << std::endl;
         if(bytes_flushed == -1){
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 // Retry write() later.
@@ -573,8 +574,9 @@ bool check_rpc_id(const Message &message, const Key &correct_rpc_id) {
 
 // crawling
 
-void process_answers(int epollfd, P2PType expected_type, std::function<bool(socket_t, u_short)> handle_answer, size_t expected_responses = 1) {
+bool process_answers(int epollfd, P2PType expected_type, std::function<bool(socket_t, u_short)> handle_answer, size_t expected_responses = 1) {
     std::vector<epoll_event> epoll_events{64};
+
     while(expected_responses > 0) {
         int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), 5000);
         if (event_count != -1) {
@@ -609,9 +611,10 @@ void process_answers(int epollfd, P2PType expected_type, std::function<bool(sock
                 }
             }
         } else {
-            break;
+            return false;
         }
     }
+    return true;
 }
 
 std::vector<Node> blocking_node_lookup(Key &key, size_t number_of_nodes) {
@@ -641,7 +644,7 @@ std::vector<Node> blocking_node_lookup(Key &key, size_t number_of_nodes) {
             break;
         }
 
-        int responses_left = 0;
+        int expected_answers = 0;
 
         if (closest_nodes.size() > ALPHA) {
             closest_nodes.resize(ALPHA);
@@ -649,18 +652,32 @@ std::vector<Node> blocking_node_lookup(Key &key, size_t number_of_nodes) {
 
         for (auto& node: closest_nodes) {
             if (node.port != 0 && node != routing_table.get_local_node()) {
-                socket_t sockfd = setup_connect_socket(epollfd, node.addr, node.port, ConnectionType::P2P);
-                setup_epollin(epollfd, sockfd);
-                forge_DHT_RPC_find_node(sockfd, main_epollfd, key);
-                responses_left++;
+                socket_t peer_socket = setup_connect_socket(epollfd, node.addr, node.port, ConnectionType::P2P);
+                if (peer_socket != -1) {
+                    setup_epollin(epollfd, peer_socket);
+                    if (!setup_tls_blocking(peer_socket)) {
+                        routing_table.remove(node);
+                        continue;
+                    }
+                    auto sent = forge_DHT_RPC_find_node(peer_socket, epollfd, key);
+                    auto [is_socket_still_up ,everything_was_sent] = flush_sendbuf(peer_socket, connection_map[peer_socket], epollfd);
+                    if (is_socket_still_up && everything_was_sent) {
+                        expected_answers++;
+                    } else {
+                        routing_table.remove(node);
+                    }
+                } else {
+                    routing_table.remove(node);
+                }
             }
         }
+
 
         auto handle_answer = [&](socket_t sockfd, u_short message_size) {
             return handle_DHT_RPC_find_node_reply(sockfd, message_size, &returned_nodes);
         };
 
-        process_answers(epollfd, P2PType::DHT_RPC_FIND_NODE_REPLY, handle_answer, responses_left);
+        process_answers(epollfd, P2PType::DHT_RPC_FIND_NODE_REPLY, handle_answer, expected_answers);
 
         for (const auto& node : returned_nodes) { // add new nodes to closest nodes
             if (std::ranges::find(closest_nodes, node) == closest_nodes.end()) {
@@ -708,7 +725,7 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
 
     auto found_values = std::vector<Value>{};
     int epollfd = epoll_create1(0);
-    size_t expected_responses = 0;
+    size_t expected_answers = 0;
     for (auto& node : k_closest_nodes) {
         if (node.port == 0) {
             continue;
@@ -722,10 +739,25 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
             continue;
         }
 
+        std::cout << "sending request to other node" << std::endl;
+
         socket_t sockfd = setup_connect_socket(epollfd, node.addr, node.port, {ConnectionType::P2P});
-        if (sockfd != -1) {
-            forge_DHT_RPC_find_value(sockfd, main_epollfd, key);
-            expected_responses++;
+        socket_t peer_socket = setup_connect_socket(epollfd, node.addr, node.port, ConnectionType::P2P);
+        if (peer_socket != -1) {
+            setup_epollin(epollfd, peer_socket);
+            if (!setup_tls_blocking(peer_socket)) {
+                routing_table.remove(node);
+                continue;
+            }
+            auto sent = forge_DHT_RPC_find_node(peer_socket, epollfd, key);
+            auto [is_socket_still_up ,everything_was_sent] = flush_sendbuf(peer_socket, connection_map[peer_socket], epollfd);
+            if (is_socket_still_up && everything_was_sent) {
+                expected_answers++;
+            } else {
+                routing_table.remove(node);
+            }
+        } else {
+            routing_table.remove(node);
         }
     }
 
@@ -733,7 +765,7 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
         return handle_DHT_RPC_find_value_reply(sockfd, message_size, &found_values);
     };
 
-    process_answers(epollfd, P2PType::DHT_RPC_FIND_NODE_REPLY, handle_answer, expected_responses);
+    process_answers(epollfd, P2PType::DHT_RPC_FIND_VALUE_REPLY, handle_answer, expected_answers);
 
     std::map<Value, int> frequency;
     for (auto& value : found_values) {
@@ -804,7 +836,7 @@ bool handle_DHT_get(socket_t socket, u_short body_size) {
     const Message& message = connection_map[socket].receive_bytes;
     Key key;
     read_body(message, 0, key.data(), KEY_SIZE);
-
+    std::cout << "Got request to get key " << key_to_string(key) << std::endl;
     std::thread([key, socket]() mutable {
         crawl_blocking_and_return(key, socket);
     }).detach();
@@ -861,21 +893,33 @@ bool forge_DHT_RPC_ping(socket_t socket, int epollfd) {
     return true;
 }
 
-bool handle_DHT_RPC_ping(const socket_t socket, const u_short body_size) {
+bool handle_DHT_RPC_ping(const socket_t socket, int epollfd, const u_short body_size) {
     const Message& message = connection_map[socket].receive_bytes;
     Key rpc_id = read_rpc_header(message, connection_map[socket].client_addr);
-    forge_DHT_RPC_ping_reply(socket, rpc_id);
+    forge_DHT_RPC_ping_reply(socket, epollfd, rpc_id);
     return true;
 }
 
-bool forge_DHT_RPC_ping_reply(socket_t socket, Key rpc_id) {
+bool forge_DHT_RPC_ping_reply(socket_t socket, int epollfd, Key rpc_id) {
+    size_t body_size = RPC_SUB_HEADER_SIZE;
+    size_t message_size = HEADER_SIZE + body_size;
+    u_short message_type = DHT_RPC_PING_REPLY;
+    Message message(message_size);
+
+    build_DHT_header(message, message_size, message_type);
+    build_RPC_header(message, rpc_id);
+
+    send_DHT_message(socket, message, epollfd);
     return true;
 }
 
-bool handle_DHT_RPC_ping_reply(const socket_t socket, const u_short body_size) {
+bool handle_DHT_RPC_ping_reply(const socket_t socket, const u_short body_size, std::set<socket_t>* successfully_pinged_sockets) {
     const Message& message = connection_map[socket].receive_bytes;
     if (!check_rpc_id(message, connection_map[socket].rpc_id)) {
         return false;
+    }
+    if (successfully_pinged_sockets) {
+        successfully_pinged_sockets->insert(socket);
     }
     return true;
 }
@@ -999,6 +1043,57 @@ bool forge_DHT_RPC_find_node(socket_t socket, int epollfd, NodeID target_node_id
     return true;
 }
 
+bool perform_maintenance() {
+    int epollfd = epoll_create1(0);
+    if (epollfd == -1) {
+        std::cerr << "Error creating epollfd. Aborting maintenance." << std::endl;
+        return false;
+    }
+
+    std::cout << "Performing maintenance..." << std::endl;
+
+    size_t expected_answers = 0;
+    auto pinged_sockets_map = std::map<socket_t, Node>{};
+    for (auto& bucket : routing_table.get_bucket_list()) {
+        for (auto& node : bucket.get_peers()) {
+            socket_t peer_socket = setup_connect_socket(epollfd, node.addr, node.port, ConnectionType::P2P);
+            if (peer_socket != -1) {
+                setup_epollin(epollfd, peer_socket);
+                if (!setup_tls_blocking(peer_socket)) {
+                    routing_table.remove(node);
+                    continue;
+                }
+                auto sent = forge_DHT_RPC_ping(peer_socket, epollfd);
+                auto [is_socket_still_up ,everything_was_sent] = flush_sendbuf(peer_socket, connection_map[peer_socket], epollfd);
+                if (is_socket_still_up && everything_was_sent) {
+                    pinged_sockets_map[peer_socket] = node;
+                    expected_answers++;
+                } else {
+                    routing_table.remove(node);
+                }
+            } else {
+                routing_table.remove(node);
+            }
+        }
+    }
+
+    std::set<socket_t> successfully_pinged_sockets{};
+    auto handle_answer = [&](socket_t sockfd, u_short body_size) {
+        return handle_DHT_RPC_ping_reply(sockfd, body_size, &successfully_pinged_sockets);
+    };
+    bool success = process_answers(epollfd, P2PType::DHT_RPC_FIND_NODE_REPLY, handle_answer, expected_answers);
+    if (success) {
+        for (auto& [sockfd, node] : pinged_sockets_map) {
+            if (!successfully_pinged_sockets.contains(sockfd)) {
+                routing_table.remove(node);
+            }
+        }
+        return true;
+    } else {
+        return false;
+    }
+}
+
 bool handle_DHT_RPC_find_node(const socket_t socket, const u_short body_size) {
     if (body_size != RPC_SUB_HEADER_SIZE + NODE_ID_SIZE) {
         return false;
@@ -1103,6 +1198,7 @@ bool handle_DHT_RPC_find_value(const socket_t socket, const u_short body_size) {
     if (body_size != RPC_SUB_HEADER_SIZE + KEY_SIZE) {
         return false;
     }
+    std::cout << "Was asked to get value..." << std::endl;
     const Message &message = connection_map[socket].receive_bytes;
 
     Key rpc_id = read_rpc_header(message, connection_map[socket].client_addr);
@@ -1265,7 +1361,7 @@ bool parse_P2P_request(socket_t socket, const u_short body_size, const P2PType p
     try {
         switch (p2p_type) {
             case DHT_RPC_PING:
-                return handle_DHT_RPC_ping(socket, body_size);
+                return handle_DHT_RPC_ping(socket, main_epollfd, body_size);
             case DHT_RPC_STORE:
                 return handle_DHT_RPC_store(socket, body_size);
             case DHT_RPC_FIND_NODE:
@@ -1273,7 +1369,7 @@ bool parse_P2P_request(socket_t socket, const u_short body_size, const P2PType p
             case DHT_RPC_FIND_VALUE:
                 return handle_DHT_RPC_find_value(socket, body_size);
             case DHT_RPC_PING_REPLY:
-                return handle_DHT_RPC_ping_reply(socket, body_size);
+                return handle_DHT_RPC_ping_reply(socket, body_size, nullptr);
             case DHT_RPC_STORE_REPLY:
                 return handle_DHT_RPC_store_reply(socket, body_size);
             case DHT_RPC_FIND_NODE_REPLY:
@@ -1626,12 +1722,6 @@ bool handle_EPOLLOUT(int epollfd, const epoll_event &current_event){
 
 }
 
-void remove_client(int epollfd, int curfd) {
-    epoll_ctl(epollfd, EPOLL_CTL_DEL, curfd, nullptr);
-    close(curfd);
-    connection_map.erase(curfd);
-}
-
 bool read_EPOLLIN(int epollfd, const epoll_event& current_event){
     socket_t socketfd = current_event.data.fd;
     if (!connection_map.contains(socketfd)) {
@@ -1721,7 +1811,7 @@ socket_t setup_server_socket(u_short port) {
     return serversocket;
 }
 
-socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t port, const ConnectionType connection_type) {
+socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t port, const ConnectionType connection_type, bool set_up_ssl) {
     socket_t peer_socket = socket(AF_INET6, SOCK_STREAM, 0);
     if (peer_socket == -1) {
         std::cerr << "Failed to create client socket on port " << port << "." << std::endl;
@@ -1761,7 +1851,7 @@ socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t po
     auto &connection_info_emplaced = connection_map[peer_socket];
 
     //Inject SSL-Code:
-    if(connection_type == ConnectionType::P2P){
+    if(connection_type == ConnectionType::P2P && set_up_ssl){
         #ifdef VERBOSE
         std::cout << "Setting up SSL for outgoing client connection (we are client)" << std::endl;
         #endif
@@ -1832,7 +1922,7 @@ void prepare_SSL_Config(in_port_t host_p2p_port){
     }
 
     #ifdef VERBOSE
-    std::cout << "Generated Kademlia-ID as hex: ";
+    std::cout << "Generated Kademlia Node ID as hex: ";
     Utils::print_hex(SSLConfig::id.data(), 32);
     #endif
 
@@ -1846,7 +1936,7 @@ void prepare_SSL_Config(in_port_t host_p2p_port){
 
     //Generate self-signed certificate
 
-    SSLConfig::cert = CertUtils::create_self_signed_cert(SSLConfig::pkey, SSLConfig::ipv6_buf,reinterpret_cast<const char*>(SSLConfig::id.data()));
+    SSLConfig::cert = CertUtils::create_self_signed_cert(SSLConfig::pkey, SSLConfig::ipv6_buf, std::string(SSLConfig::id.begin(), SSLConfig::id.end()));
     if(!SSLConfig::cert){
         std::cerr << "Failed to generate self-signed X509 certificate" << std::endl;
         EVP_PKEY_free(SSLConfig::pkey);
@@ -1962,10 +2052,19 @@ bool run_with_timeout(Function&& func, std::chrono::seconds timeout, Args&&... a
     }
 }
 
-bool setup_tls_blocking(int epollfd) {
-    std::vector<epoll_event> epoll_events{64};
+bool setup_tls_blocking(socket_t peer_socket) {
+    set_socket_blocking(peer_socket, false);
 
-    while (true) {
+    int epollfd = epoll_create1(0);
+    auto epollEvent = epoll_event{};
+    epollEvent.events = EPOLLIN | EPOLLOUT | EPOLLERR;
+    epollEvent.data.fd = peer_socket;
+    epoll_ctl(epollfd, EPOLL_CTL_ADD, peer_socket, &epollEvent);
+    std::vector<epoll_event> epoll_events{64};
+    auto start_time = std::chrono::steady_clock::now();
+
+    int tries = 0;
+    while (true) { // event cound never -1 because epollout.
         int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), 5000);  // dangerous cast
         if (event_count == -1) {
             if (errno == EINTR) { // for debugging purposes
@@ -1983,6 +2082,7 @@ bool setup_tls_blocking(int epollfd) {
             }
             // handle client processing of existing sessions
             if (connection_map[current_event.data.fd].ssl_stat == SSLStatus::CONNECTED) {
+                std::cout << "TLS Connection established." << std::endl;
                 return true;
             }
             if (current_event.events & EPOLLIN)
@@ -1991,10 +2091,57 @@ bool setup_tls_blocking(int epollfd) {
                 socket_still_valid = handle_EPOLLOUT(epollfd,current_event);
             if (socket_still_valid && current_event.events & EPOLLERR){
                 tear_down_connection(epollfd,current_event.data.fd);
-                remove_client(epollfd, current_event.data.fd);
+            }
+        }
+        auto current_time = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
+        if (elapsed.count() > 2) {
+            tear_down_connection(epollfd, peer_socket);
+            return false;
+        }
+    }
+}
+
+bool wait_on_find_node_reply(socket_t peer_socket) {
+    std::vector<epoll_event> epoll_events{64};
+    int epollfd = epoll_create1(0);
+    auto event = epoll_event{};
+    event.events = EPOLLIN;
+    event.data.fd = peer_socket;
+    epoll_ctl(epollfd, EPOLL_CTL_ADD, peer_socket, &event);
+
+    while (int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), 5000) != -1) {
+        for (int i = 0; i < event_count; i++) {
+            bool still_valid = true;
+            if  (epoll_events[i].events & EPOLLOUT) {
+                still_valid = handle_EPOLLOUT(epollfd, epoll_events[i]);
+            }
+            if  (still_valid && epoll_events[i].events & EPOLLIN) {
+                if (!read_EPOLLIN(epollfd, epoll_events[i])) {
+                    std::cerr << "Didn't receive response during bootstrap" << std::endl;
+                    return false;
+                }
+
+                socket_t sockfd = epoll_events[i].data.fd;
+                auto& connection_info = connection_map[sockfd];
+
+                u_short message_size, dht_type;
+                if (parse_header(connection_info, message_size, dht_type) &&
+                    dht_type == P2PType::DHT_RPC_FIND_NODE_REPLY) {
+                    if (handle_DHT_RPC_find_node_reply(sockfd, message_size - HEADER_SIZE)) {
+                        return true;
+                    } else {
+                        std::cerr << "Received invalid find node reply during bootstrap" << std::endl;
+                        tear_down_connection(epollfd, peer_socket);
+                        return false;
+                    }
+                } else {
+                    continue;
+                }
             }
         }
     }
+    return false;
 }
 
 bool connect_to_network(u_short peer_port, const std::string &peer_address_string, struct in6_addr peer_address) {
@@ -2008,12 +2155,9 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
 
     int epollfd = epoll_create1(0);
     socket_t peer_socket = setup_connect_socket(peer_port, peer_address, epollfd);
-    set_socket_blocking(peer_socket, false);
-    auto epollEvent = epoll_event{};
-    epollEvent.events = EPOLLIN | EPOLLOUT | EPOLLERR;
-    epollEvent.data.fd = peer_socket;
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, peer_socket, &epollEvent);
-    bool ssl_success = setup_tls_blocking(epollfd);
+    setup_epollin(epollfd, peer_socket);
+
+    bool ssl_success = setup_tls_blocking(peer_socket);
 
     if (peer_socket == -1 || epollfd == -1 || !ssl_success) {
         std::cerr << "Error creating socket. Aborting." << std::endl;
@@ -2025,51 +2169,23 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
         std::cerr << "Couldn't send Find Node Request during bootstrap from " << peer_address_string << ":" << peer_port << std::endl;
     }
 
-    std::vector<epoll_event> epoll_events{64};
     // manually send forge
     flush_sendbuf(peer_socket, connection_map[peer_socket], epollfd);
-    int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), 5000);
-    if (event_count != -1) {
-        for (int i = 0; i < event_count; i++) {
-            bool still_valid = true;
-            if  (epoll_events[i].events & EPOLLOUT) {
-                still_valid = handle_EPOLLOUT(epollfd, epoll_events[i]);
-            }
-            if  (still_valid && epoll_events[i].events & EPOLLIN) {
-                if (!read_EPOLLIN(epollfd, epoll_events[i])) {
-                    std::cerr << "Didn't receive response during bootstrap from " << peer_address_string << ":" << peer_port << std::endl;
-                    return false;
-                }
 
-                socket_t sockfd = epoll_events[i].data.fd;
-                auto& connection_info = connection_map[sockfd];
+    std::set<Node> returned_nodes{};
+    auto handle_answer = [&](socket_t sockfd, u_short message_size) {
+        return handle_DHT_RPC_find_node_reply(sockfd, message_size, &returned_nodes);
+    };
 
-                u_short message_size, dht_type;
-                if (parse_header(connection_info, message_size, dht_type) &&
-                    dht_type == P2PType::DHT_RPC_FIND_NODE_REPLY) {
-                    if (handle_DHT_RPC_find_node_reply(sockfd, message_size - HEADER_SIZE)) {
-                        std::cerr << "baum" <<  (epoll_events[i].events & EPOLLOUT) << std::endl;
-                        break;
-                    } else {
-                        std::cerr << "Received invalid find node reply during bootstrap from " << peer_address_string << ":" << peer_port << std::endl;
-                        remove_client(epollfd, peer_socket);
-                        return false;
-                    }
-                }
-                std::cerr << "Received unexpected/invalid response during bootstrap from " << peer_address_string << ":" << peer_port << std::endl;
-                std::cerr << "Message size: " << message_size << " and dht type: " << dht_type << std::endl;
-                std::cerr << (epoll_events[i].events & EPOLLOUT) << std::endl;
-                return false;
-            }
-            /*else {
-                std::cerr << "Invalid event triggered" << std::endl;
-            }*/
-        }
-    } else {
-        std::cerr << "Expected response from peer " << peer_address_string << ":" << peer_port << " but didn't get a valid one." << std::endl;
+    bool success = process_answers(epollfd, P2PType::DHT_RPC_FIND_NODE_REPLY, handle_answer, 1);
+
+    if (!success) {
+        std::cerr << "Expected valid find node reply response from peer " << peer_address_string << ":" << peer_port << " but didn't get a valid one." << std::endl;
         return false;
     }
 
+    auto count = routing_table.count();
+    std::cout << "Got response with " << count << " peer" <<  (count != 1 ? "s" : "") << " other than our own." << std::endl;
 
     size_t last_bucket_number;
     do {
@@ -2083,7 +2199,7 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
         }
     } while (routing_table.get_bucket_list().size() != last_bucket_number);
 
-    auto count = routing_table.count();
+    count = routing_table.count();
     std::cout << "Joined network and found " << count << " existing node" << (count != 1 ? "s." : ".") << std::endl;
 
     return true;
@@ -2115,7 +2231,7 @@ int main(int argc, char const *argv[])
         std::string help_description = "Run a DHT peer with local storage.\n\n"
                     "Multiple API clients can connect to this same instance.\n"
                     "To connect to an existing network, provide the ip address and port of a peer, otherwise a new network will be created.\n";
-        std::string examples = "Example usages:\n"
+        std::string examples = "Example usages:\n" // TODO: ::1 ergänzen
                     "Start new p2p network on 192.168.0.42:7402\n"
                     "\tdht_server -a 192.168.0.42 -m 7401 -p 7402\n"
                     "Connect to p2p network on 192.168.0.42:7402 from 192.168.0.69:7404, accepting requests on port 7403\n"
@@ -2209,11 +2325,7 @@ int main(int argc, char const *argv[])
     // first: setup RPC messages, to make "joining" possible by sending a "FIND_NODE" to the contact
     // then, for case 1 we need Node A to send FIND_NODE to node B that receives a triple from A or how does A present itself to B?
 
-
     routing_table = RoutingTable(host_address, host_p2p_port);
-
-
-
 
     // Ignore SIGPIPE (if socket gets closed by remote peer, we might accidentally write to a broken pipe)
     signal(SIGPIPE, SIG_IGN);
@@ -2234,7 +2346,6 @@ int main(int argc, char const *argv[])
     }
 
     //Generate everything necessary for SSL. See ssl.cpp/ssl.h
-
     prepare_SSL_Config(host_p2p_port);
 
     if(should_connect_to_network) {
@@ -2249,8 +2360,6 @@ int main(int argc, char const *argv[])
 
 
     // event loop
-
-
 
     std::cout << "Server running... " << std::endl;
     bool server_is_running = true;
@@ -2287,7 +2396,6 @@ int main(int argc, char const *argv[])
                     socket_still_valid = handle_EPOLLOUT(main_epollfd,current_event);
                 if (socket_still_valid && current_event.events & EPOLLERR){
                     tear_down_connection(main_epollfd,current_event.data.fd);
-                    remove_client(main_epollfd, current_event.data.fd);
                 }
             }
         }

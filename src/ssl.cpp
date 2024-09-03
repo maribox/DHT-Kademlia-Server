@@ -1,5 +1,7 @@
 #include "ssl.h"
 
+#include "common_types.h"
+
 #define VERBOSE
 
 

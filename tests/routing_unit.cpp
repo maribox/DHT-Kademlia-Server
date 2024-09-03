@@ -117,6 +117,33 @@ TEST_CASE("RoutingTable", "[routing]") {
     }
 }
 
+TEST_CASE("RoutingTable remove peer", "[routing]") {
+    RoutingTable routing_table = RoutingTable(in6addr_loopback, 8080);
+
+    NodeID peerID;
+    peerID.fill(0);
+    peerID[0] = 1;
+    Node peer = {in6addr_loopback, static_cast<u_short>(ServerConfig::P2P_PORT + 2), peerID};
+
+    NodeID peerID2;
+    peerID2.fill(2);
+    peerID2[0] = 1;
+    Node peer2 = {in6addr_loopback, static_cast<u_short>(ServerConfig::P2P_PORT + 4), peerID2};
+
+    routing_table.add_peer(peer);
+    routing_table.add_peer(peer2);
+
+    auto& peers = routing_table.get_bucket_list().at(0).get_peers();
+    REQUIRE(peers.size() == 2);
+
+    bool removed = routing_table.remove(in6addr_loopback, static_cast<u_short>(ServerConfig::P2P_PORT + 2));
+    REQUIRE(removed);
+    bool removed2 = routing_table.remove(peer2);
+    REQUIRE(removed2);
+
+    REQUIRE(peers.empty());
+}
+
 
 TEST_CASE( "generate_random_nodeID", "[routing]") { // this test was very flaky during development, hence the high number of repetitions
     for (int j = 0; j < 200; j++) {

@@ -42,6 +42,28 @@ bool KBucket::add_peer(const Node &peer) { // returns true if inserted or alread
     }
 }
 
+bool KBucket::remove(const in6_addr &ip, const in_port_t &port) {
+    const auto it = std::ranges::find_if(peers,
+                 [&ip, &port](const Node& node) {
+                     return memcmp(&node.addr, &ip, sizeof(in6_addr)) == 0 && node.port == port;
+                 });
+    if (it != peers.end()) {
+        peers.erase(it);
+        return true;
+    }
+    return false;
+}
+
+bool KBucket::remove(const Node& target_node) {
+    const auto it = std::ranges::find_if(peers,
+                 [&target_node](const Node& node) { return node == target_node;});
+    if (it != peers.end()) {
+        peers.erase(it);
+        return true;
+    }
+    return false;
+}
+
 bool KBucket::contains(const Node &node) {
     return std::find(peers.begin(), peers.end(), node) != peers.end();
 }
@@ -73,6 +95,24 @@ bool RoutingTable::contains(const Node &node) {
     return bucket_list[get_bucket_for(node.id)].contains(node);
 }
 
+bool RoutingTable::remove(const in6_addr &ip, const in_port_t &port) {
+    for (auto& bucket : bucket_list) {
+        if (bucket.remove(ip, port)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RoutingTable::remove(const Node& target_node) {
+    for (auto& bucket : bucket_list) {
+        if (bucket.remove(target_node)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 size_t RoutingTable::get_bucket_for(NodeID node_id) {
     for (size_t bucket_i = 0; bucket_i < bucket_list.size(); bucket_i++) {
         auto& bucket = bucket_list.at(bucket_i);
@@ -91,10 +131,10 @@ NodeID RoutingTable::node_distance(const NodeID& node_1, const NodeID& node_2) {
     return distance;
 }
 
-
-
 std::vector<Node> RoutingTable::find_closest_nodes(NodeID target_node_id) {
     std::vector<Node> closest_nodes;
+
+
     int bucket_index_left = get_bucket_for(target_node_id) - 1;
     int bucket_index_right = bucket_index_left + 1;
 

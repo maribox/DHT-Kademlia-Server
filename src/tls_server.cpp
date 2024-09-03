@@ -71,7 +71,7 @@ int main(int argc, char const *argv[])
 
 
         //Generate self-signed certificate
-
+        // TODO still neede? error prone if id/ipv6_buf contains \0
         X509* cert = CertUtils::create_self_signed_cert(pkey, ipv6_buf,reinterpret_cast<const char*>(id.data()));
         if(!cert){
             std::cerr << "Failed to generate self-signed X509 certificate" << std::endl;
