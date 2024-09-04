@@ -25,6 +25,8 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0") # Add -O0 flag for 
 
 find_package(Boost REQUIRED COMPONENTS program_options)
 find_package(OpenSSL REQUIRED)
+find_package(spdlog REQUIRED)
+
 
 add_executable(dht_server ${SOURCE_DIR}/dht_server.cpp ${SOURCE_DIR}/routing.cpp
 ${SOURCE_DIR}/common_types.h ${SOURCE_DIR}/ssl.cpp)
@@ -47,6 +49,7 @@ target_link_libraries(dht_server PRIVATE ${Boost_LIBRARIES} OpenSSL::SSL OpenSSL
 target_link_libraries(testing PRIVATE Catch2::Catch2WithMain ${Boost_LIBRARIES})
 target_link_libraries(routing_tests PRIVATE Catch2::Catch2WithMain ${Boost_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto)
 target_link_libraries(tls_server OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(dht_server PRIVATE spdlog::spdlog spdlog::spdlog_header_only)
 
 target_link_options(dht_server PRIVATE -no-pie)
 
