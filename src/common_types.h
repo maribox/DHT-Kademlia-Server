@@ -1,5 +1,10 @@
 #pragma once
 
+#define GENERAL_VERBOSE
+#define TCP_VERBOSE
+#define KADEMLIA_VERBOSE
+#define SSL_VERBOSE
+
 static constexpr size_t KEY_SIZE  = 32;
 
 static constexpr size_t K = 20;

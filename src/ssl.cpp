@@ -2,7 +2,7 @@
 
 #include "common_types.h"
 
-#define VERBOSE
+
 
 
 bool NetworkUtils::is_non_blocking(int fd) {
@@ -180,7 +180,9 @@ char* NetworkUtils::receive_data_with_length_prefix(int sock_fd, size_t& length)
         return nullptr;
     }
     uint32_t data_length = ntohl(net_length);
+    #ifdef SSL_VERBOSE
     std::cout << "Length prefix was:" << data_length << std::endl;
+    #endif
     // Allocate buffer for the data
     char* buffer = (char*)malloc(data_length);
     if (buffer == nullptr) {
@@ -209,7 +211,7 @@ char* NetworkUtils::receive_data_with_length_prefix(int sock_fd, size_t& length)
 void NetworkUtils::prepare_data_with_length_prefix(std::vector<unsigned char>& buffer, const char* data, const size_t length) {
     // Clear the buffer to ensure it's empty before appending new data
     if(buffer.size() != 0){
-        #ifdef VERBOSE
+        #ifdef SSL_VERBOSE
         std::cout << "Preperation to send length-prefixed data (normally certificate) failed. Buffer already contained elements!" << std::endl;
         #endif
         buffer.clear();
@@ -502,9 +504,12 @@ bool SSLUtils::extract_custom_id(X509* cert, unsigned char* received_id) {
     
     // Copy the data to the provided buffer
     std::memcpy(received_id, octet_string->data, 32);
-    
+
+    #ifdef SSL_VERBOSE
     std::cout << "Received ID as hex: ";
     Utils::print_hex(received_id, 32);
+    #endif
+
     return true; // Successfully extracted the ID
 }
 
@@ -655,27 +660,28 @@ bool SSLUtils::compare_x509_cert_with_pem(X509* received_cert, const std::string
 }
 
 SSLStatus SSLUtils::try_ssl_accept(SSL* ssl){
-    int ssl_accept_result;
-    ssl_accept_result = SSL_accept(ssl);
+    int ssl_accept_result = SSL_accept(ssl);
     if(ssl_accept_result <= 0){
         int ssl_error = SSL_get_error(ssl, ssl_accept_result);
-        if (ssl_error == SSL_ERROR_WANT_READ || SSL_ERROR_WANT_WRITE){
-            return SSLStatus::AWAITING_ACCEPT;
+        if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE){
+            return SSLStatus::PENDING_ACCEPT;
         }
         else {
             return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
         }
     }
+    #ifdef SSL_VERBOSE
+    std::cout << "Successfully set up SSL Connection." << std::endl;
+    #endif
     return SSLStatus::ACCEPTED;
 }
 
 SSLStatus SSLUtils::try_ssl_connect(SSL* ssl){
-    int ssl_connect_result;
-    ssl_connect_result = SSL_connect(ssl);
+    int ssl_connect_result = SSL_connect(ssl);
     if(ssl_connect_result <= 0){
         int ssl_error = SSL_get_error(ssl, ssl_connect_result);
         if (ssl_error == SSL_ERROR_WANT_READ || SSL_ERROR_WANT_WRITE){
-            return SSLStatus::AWAITING_CONNECT;
+            return SSLStatus::PENDING_CONNECT;
         }
         else {
             return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;

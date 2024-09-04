@@ -31,13 +31,13 @@
 #include <cstdint>  // for uintptr_t
 using CertificateMap = std::unordered_map<std::string, std::pair<in_port_t,std::string>>; //maps P2P-ID to <port,certificate>
 
-enum class SSLStatus{
+enum class SSLStatus{ // TODO:
     ACCEPTED = 0 ,                  //Server status: SSL Connection was accepted successfully. Encryption works, we authenticated ourself.
     CONNECTED,                      //Client status: SSL Connection was conntected successfully. Encryption works, authenticity of peer ensured.
     HANDSHAKE_SERVER_WRITE_CERT,    //Server status: Server has not been able to flush certificate (send). Retry until fully flushed.
     HANDSHAKE_CLIENT_READ_CERT,     //Client status: Client has not been able to receive full server certificate. Retry until fully available.
-    AWAITING_ACCEPT,                //Server status: Transitioned from HANDSHAKE_SERVER_WRITE_CERT. Server has fully flushed certificate. Waits on accept() for the client's connect(). NOTE: SLIGHT AMBIGUITY. Status with AWAITING... means that we wait on the function. WE CALL THE AWAITED FUNCTION.
-    AWAITING_CONNECT,               //Client status: Transitioned from HANDSHAKE_CLIENT_READ_CERT. Client has fully read certificate. Waits on connect() for the server's accept(). NOTE: SLIGHT AMBIGUITY. Status with AWAITING... means that we wait on the function. WE CALL THE AWAITED FUNCTION.
+    PENDING_ACCEPT,                //Server status: Transitioned from HANDSHAKE_SERVER_WRITE_CERT. Server has fully flushed certificate. Wants to accept() for the client's connect(). NOTE: SLIGHT AMBIGUITY. Status with PENDING... means that we want to accept next.
+    PENDING_CONNECT,               //Client status: Transitioned from HANDSHAKE_CLIENT_READ_CERT. Client has fully read certificate. Wants to connect() for the server's accept(). NOTE: SLIGHT AMBIGUITY. Status with PENDING... means that we want to connect next.
     FATAL_ERROR_ACCEPT_CONNECT      //Universal status: Major malfunction of / deviation from protocol. Error state used to indicate a (near) future tear_down_connection()
 };
 

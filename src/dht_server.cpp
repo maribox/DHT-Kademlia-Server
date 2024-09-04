@@ -19,8 +19,6 @@
 #include <chrono>
 
 
-#define VERBOSE
-
 //#include "routing.cpp"
 namespace progOpt = boost::program_options;
 
@@ -233,13 +231,13 @@ void tear_down_connection(int epollfd, socket_t socketfd){
 
         epoll_ctl(epollfd,EPOLL_CTL_DEL,socketfd,nullptr);
 
-        #ifdef VERBOSE
+        #ifdef TCP_VERBOSE
             std::cout << "Tore down connection running over port: " << connection_info.client_port << "." << std::endl;
         #endif
 
     }else{
         //Should be a dead branch:
-        #ifdef VERBOSE
+        #ifdef TCP_VERBOSE
         std::cout << "Supposedly dead control flow branch reached in tear_down_connection(...)" << std::endl;
         #endif
         close(socketfd);
@@ -294,7 +292,7 @@ std::pair<bool,bool> flush_write_connInfo_without_SSL(ConnectionInfo &connection
 
     do{
         bytes_flushed = write(socketfd,sendbuf.data(),sendbuf.size());
-        std::cout << bytes_flushed << std::endl;
+
         if(bytes_flushed == -1){
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 // Retry write() later.
@@ -530,7 +528,9 @@ Key read_rpc_header(const Message& message, in6_addr peer_ip) {
 
     auto peer = Node{peer_ip, sender_port, sender_node_id};
     if (!routing_table.contains(peer)) {
+        #ifdef KADEMLIA_VERBOSE
         std::cout << "Got contacted by new peer reachable at " << ip_to_string(peer.addr) << ":" << sender_port << std::endl;
+        #endif
         routing_table.add_peer(peer);
     }
 
@@ -655,7 +655,7 @@ std::vector<Node> blocking_node_lookup(Key &key, size_t number_of_nodes) {
                 socket_t peer_socket = setup_connect_socket(epollfd, node.addr, node.port, ConnectionType::P2P);
                 if (peer_socket != -1) {
                     setup_epollin(epollfd, peer_socket);
-                    if (!setup_tls_blocking(peer_socket)) {
+                    if (!ensure_tls_blocking(peer_socket)) {
                         routing_table.remove(node);
                         continue;
                     }
@@ -705,7 +705,9 @@ void crawl_blocking_and_store(Key &key, Value &value, const int time_to_live, in
         }
 
         if (node == routing_table.get_local_node()) {
+            #ifdef KADEMLIA_VERBOSE
             std::cout << "Stored key '" << key_to_string(key) << "' with value '" << value.data() << "' to own storage" << std::endl;
+            #endif
             save_to_storage(key, std::chrono::seconds(time_to_live), value);
             continue;
         }
@@ -732,20 +734,24 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
         }
 
         if (node == routing_table.get_local_node()) {
+            #ifdef KADEMLIA_VERBOSE
             std::cout << "Trying to get key '" << key_to_string(key) << "' from own storage" << std::endl;
+            #endif
             if (const Value* value = get_from_storage(key)) {
                 found_values.push_back(*value);
             }
             continue;
         }
 
+        #ifdef KADEMLIA_VERBOSE
         std::cout << "sending request to other node" << std::endl;
+        #endif
 
         socket_t sockfd = setup_connect_socket(epollfd, node.addr, node.port, {ConnectionType::P2P});
         socket_t peer_socket = setup_connect_socket(epollfd, node.addr, node.port, ConnectionType::P2P);
         if (peer_socket != -1) {
             setup_epollin(epollfd, peer_socket);
-            if (!setup_tls_blocking(peer_socket)) {
+            if (!ensure_tls_blocking(peer_socket)) {
                 routing_table.remove(node);
                 continue;
             }
@@ -836,7 +842,9 @@ bool handle_DHT_get(socket_t socket, u_short body_size) {
     const Message& message = connection_map[socket].receive_bytes;
     Key key;
     read_body(message, 0, key.data(), KEY_SIZE);
+    #ifdef KADEMLIA_VERBOSE
     std::cout << "Got request to get key " << key_to_string(key) << std::endl;
+    #endif
     std::thread([key, socket]() mutable {
         crawl_blocking_and_return(key, socket);
     }).detach();
@@ -1020,7 +1028,9 @@ bool handle_DHT_RPC_store_reply(const socket_t socket, const u_short body_size) 
     }
 
     if (!std::ranges::equal(sent_value, saved_value)) {
+        #ifdef KADEMLIA_VERBOSE
         std::cout << "Got back different value than sent value for sent key " << key_to_string(sent_key) << std::endl;
+        #endif
     }
     return true;
 }
@@ -1049,8 +1059,9 @@ bool perform_maintenance() {
         std::cerr << "Error creating epollfd. Aborting maintenance." << std::endl;
         return false;
     }
-
+    #ifdef KADEMLIA_VERBOSE
     std::cout << "Performing maintenance..." << std::endl;
+    #endif
 
     size_t expected_answers = 0;
     auto pinged_sockets_map = std::map<socket_t, Node>{};
@@ -1059,7 +1070,7 @@ bool perform_maintenance() {
             socket_t peer_socket = setup_connect_socket(epollfd, node.addr, node.port, ConnectionType::P2P);
             if (peer_socket != -1) {
                 setup_epollin(epollfd, peer_socket);
-                if (!setup_tls_blocking(peer_socket)) {
+                if (!ensure_tls_blocking(peer_socket)) {
                     routing_table.remove(node);
                     continue;
                 }
@@ -1107,8 +1118,9 @@ bool handle_DHT_RPC_find_node(const socket_t socket, const u_short body_size) {
 
     // find the closest nodes, then return them:
     auto closest_nodes = routing_table.find_closest_nodes(target_node_id);
-
+    #ifdef KADEMLIA_VERBOSE
     std::cout << "Found " << closest_nodes.size() << " nodes and returning them" << std::endl;
+    #endif
     return forge_DHT_RPC_find_node_reply(socket, main_epollfd, rpc_id, closest_nodes);
 }
 
@@ -1198,7 +1210,9 @@ bool handle_DHT_RPC_find_value(const socket_t socket, const u_short body_size) {
     if (body_size != RPC_SUB_HEADER_SIZE + KEY_SIZE) {
         return false;
     }
+    #ifdef KADEMLIA_VERBOSE
     std::cout << "Was asked to get value..." << std::endl;
+    #endif
     const Message &message = connection_map[socket].receive_bytes;
 
     Key rpc_id = read_rpc_header(message, connection_map[socket].client_addr);
@@ -1281,16 +1295,16 @@ bool handle_DHT_error(const socket_t socket, const u_short body_size) {
                              ":" + std::to_string(connection_map[socket].client_port);
     switch (error_type) {
         case ErrorType::DHT_NOT_FOUND:
-            std::cout << "Received DHT_NOT_FOUND error by " << addr_string <<std::endl;
+            std::cerr << "Received DHT_NOT_FOUND error by " << addr_string <<std::endl;
         break;
         case ErrorType::DHT_BAD_REQUEST:
-            std::cout << "Sent out bad request to " << addr_string << std::endl;
+            std::cerr << "Sent out bad request to " << addr_string << std::endl;
         break;
         case ErrorType::DHT_SERVER_ERROR:
-            std::cout << "Had internal server error with " << addr_string << std::endl;
+            std::cerr << "Had internal server error with " << addr_string << std::endl;
         break;
         default:
-            std::cout << "Got invalid server error by " << addr_string << std::endl;
+            std::cerr << "Got invalid server error by " << addr_string << std::endl;
     }
     return true;
 }
@@ -1476,14 +1490,14 @@ void accept_new_connection(int epollfd, const epoll_event &cur_event, Connection
     connection_info.client_port = client_port;
 
 
-    #ifdef VERBOSE
+    #ifdef TCP_VERBOSE
     std::cout << "Accepted socket connection from " << ip_to_string(client_addr.sin6_addr) << ":" << client_port << std::endl;
     #endif
 
 
     if(connection_type == ConnectionType::P2P){
 
-        #ifdef VERBOSE
+        #ifdef SSL_VERBOSE
         std::cout << "Setting up SSL for incoming client connection (we are server)" << std::endl;
         #endif
 
@@ -1496,11 +1510,11 @@ void accept_new_connection(int epollfd, const epoll_event &cur_event, Connection
         }
         SSL_set_fd(ssl, socketfd);
 
-        #ifdef VERBOSE
+        #ifdef SSL_VERBOSE
         SSLUtils::check_ssl_blocking_mode(ssl);
         #endif
 
-        #ifdef VERBOSE
+        #ifdef SSL_VERBOSE
         std::cout << "Supplying length-prefixed Server-Certificate over insecure TCP channel" << std::endl;
         #endif
 
@@ -1569,8 +1583,8 @@ CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socke
 
 
     std::string hex_id = Utils::bin_to_hex(received_id, KEY_SIZE);
-    #ifdef VERBOSE
-    std::cout << "Hex ID received in certificate is:" << hex_id << std::endl;
+    #ifdef SSL_VERBOSE
+    std::cout << "Hex ID received in certificate is: " << hex_id << std::endl;
     #endif
 
     std::string ipv6_str{};
@@ -1579,7 +1593,9 @@ CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socke
         return CertificateStatus::ERRORED_CERTIFICATE;
     }
     if (SSLConfig::cert_map.find(hex_id) != SSLConfig::cert_map.end()) {
+        #ifdef SSL_VERBOSE
         std::cout << "Kademlia ID already recognized." << std::endl;
+        #endif
         //Compare certificates
         if(SSLUtils::compare_x509_cert_with_pem(foreign_certificate, SSLConfig::cert_map.find(hex_id)->second.second)){
             //Compare yielded equality:
@@ -1638,7 +1654,7 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
                     return true;
                 }
                 return true;
-            case SSLStatus::AWAITING_ACCEPT:
+            case SSLStatus::PENDING_ACCEPT:
                 connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
                 return true;
             case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
@@ -1678,7 +1694,7 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
                 }
                 //Certificate is not fully present yet. Return true, try again later.
                 return true;
-            case SSLStatus::AWAITING_CONNECT:
+            case SSLStatus::PENDING_CONNECT:
                 connection_info.ssl_stat = SSLUtils::try_ssl_connect(connection_info.ssl);
                 return true;
             case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
@@ -1752,12 +1768,16 @@ bool handle_EPOLLIN(int epollfd, const epoll_event& current_event) { // returns 
     if (recv_buffer_empty(connection_map[socketfd])) {
         return true;
     }
+    #ifdef TCP_VERBOSE
     std::cout << "Received new request." << std::endl;
+    #endif
     ProcessingStatus processing_status;
     do {
         processing_status = try_processing(socketfd);
     } while (processing_status == MORE_TO_READ);
+    #ifdef TCP_VERBOSE
     std::cout << "Processing finished: " << processing_status << std::endl;
+    #endif
     if (processing_status == ProcessingStatus::ERROR) {
         std::cerr << "Had error with processing. Closing channel to e.g. unreachable or misbehaving peer." << std::endl;
         tear_down_connection(epollfd, socketfd);
@@ -1811,7 +1831,7 @@ socket_t setup_server_socket(u_short port) {
     return serversocket;
 }
 
-socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t port, const ConnectionType connection_type, bool set_up_ssl) {
+socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t port, const ConnectionType connection_type) {
     socket_t peer_socket = socket(AF_INET6, SOCK_STREAM, 0);
     if (peer_socket == -1) {
         std::cerr << "Failed to create client socket on port " << port << "." << std::endl;
@@ -1837,22 +1857,18 @@ socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t po
         close(peer_socket);
         return -1;
     }
-    #ifdef VERBOSE
+    #ifdef TCP_VERBOSE
     std::cout << "Connected socket to " << ip_to_string(connection_info.client_addr) << ":" << connection_info.client_port << std::endl;
     #endif
 
-    int flags = fcntl(peer_socket, F_GETFL, 0);
-    if (!(flags & O_NONBLOCK)) {
-        flags |= O_NONBLOCK;
-    }
-    fcntl(peer_socket, F_SETFL, flags);
+    set_socket_blocking(peer_socket, false);
 
     connection_map[peer_socket] = connection_info;
     auto &connection_info_emplaced = connection_map[peer_socket];
 
     //Inject SSL-Code:
-    if(connection_type == ConnectionType::P2P && set_up_ssl){
-        #ifdef VERBOSE
+    if(connection_type == ConnectionType::P2P){
+        #ifdef SSL_VERBOSE
         std::cout << "Setting up SSL for outgoing client connection (we are client)" << std::endl;
         #endif
 
@@ -1867,11 +1883,11 @@ socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t po
         }
         SSL_set_fd(ssl, peer_socket);
 
-        #ifdef VERBOSE
+        #ifdef SSL_VERBOSE
         SSLUtils::check_ssl_blocking_mode(ssl);
         #endif
 
-        #ifdef VERBOSE
+        #ifdef SSL_VERBOSE
         std::cout << "Receiving length-prefixed Server-Certificate over insecure TCP channel" << std::endl;
         #endif
 
@@ -1921,7 +1937,7 @@ void prepare_SSL_Config(in_port_t host_p2p_port){
         exit(EXIT_FAILURE);
     }
 
-    #ifdef VERBOSE
+    #ifdef KADEMLIA_VERBOSE
     std::cout << "Generated Kademlia Node ID as hex: ";
     Utils::print_hex(SSLConfig::id.data(), 32);
     #endif
@@ -2005,7 +2021,7 @@ socket_t set_socket_blocking(socket_t peer_socket, bool blocking) {
     return peer_socket;
 }
 
-socket_t setup_connect_socket(u_short peer_port, struct in6_addr peer_address, int epollfd) {
+socket_t setup_connect_socket_blocking(int epollfd, struct in6_addr peer_address, u_short peer_port) {
     socket_t peer_socket = setup_connect_socket(epollfd, peer_address, peer_port, {ConnectionType::P2P});
     return set_socket_blocking(peer_socket, true);
 }
@@ -2021,7 +2037,9 @@ void force_close_socket(int sockfd) {
         perror("close failed");
         return;
     } else {
+        #ifdef TCP_VERBOSE
         std::cout << "Socket forcefully closed." << std::endl;
+        #endif
         return;
     }
 }
@@ -2052,7 +2070,7 @@ bool run_with_timeout(Function&& func, std::chrono::seconds timeout, Args&&... a
     }
 }
 
-bool setup_tls_blocking(socket_t peer_socket) {
+bool ensure_tls_blocking(socket_t peer_socket, std::chrono::seconds timeout_sec) {
     set_socket_blocking(peer_socket, false);
 
     int epollfd = epoll_create1(0);
@@ -2070,7 +2088,7 @@ bool setup_tls_blocking(socket_t peer_socket) {
             if (errno == EINTR) { // for debugging purposes
                 continue;
             }
-            std::cout << "Couldn't build TLS tunnel: " << errno << std::endl;
+            std::cerr << "Couldn't build TLS tunnel: " << errno << std::endl;
             return false;
         }
         for (int i = 0; i < event_count; ++i) {
@@ -2082,7 +2100,9 @@ bool setup_tls_blocking(socket_t peer_socket) {
             }
             // handle client processing of existing sessions
             if (connection_map[current_event.data.fd].ssl_stat == SSLStatus::CONNECTED) {
+                #ifdef SSL_VERBOSE
                 std::cout << "TLS Connection established." << std::endl;
+                #endif
                 return true;
             }
             if (current_event.events & EPOLLIN)
@@ -2095,7 +2115,7 @@ bool setup_tls_blocking(socket_t peer_socket) {
         }
         auto current_time = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
-        if (elapsed.count() > 2) {
+        if (elapsed > timeout_sec) {
             tear_down_connection(epollfd, peer_socket);
             return false;
         }
@@ -2154,17 +2174,19 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
     //    (choose closest nodes and send them find_node rpcs with the randomly generated NodeID's in said range)
 
     int epollfd = epoll_create1(0);
-    socket_t peer_socket = setup_connect_socket(peer_port, peer_address, epollfd);
+    socket_t peer_socket = setup_connect_socket_blocking(epollfd, peer_address, peer_port);
     setup_epollin(epollfd, peer_socket);
 
-    bool ssl_success = setup_tls_blocking(peer_socket);
+    bool ssl_success = ensure_tls_blocking(peer_socket, 300s);
 
     if (peer_socket == -1 || epollfd == -1 || !ssl_success) {
         std::cerr << "Error creating socket. Aborting." << std::endl;
         return false;
     }
 
+    #ifdef KADEMLIA_VERBOSE
     std::cout << "Sending Find Node Request..." << std::endl;
+    #endif
     if (!forge_DHT_RPC_find_node(peer_socket, epollfd, routing_table.get_local_node().id)) {
         std::cerr << "Couldn't send Find Node Request during bootstrap from " << peer_address_string << ":" << peer_port << std::endl;
     }
@@ -2185,7 +2207,9 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
     }
 
     auto count = routing_table.count();
+    #ifdef KADEMLIA_VERBOSE
     std::cout << "Got response with " << count << " peer" <<  (count != 1 ? "s" : "") << " other than our own." << std::endl;
+    #endif
 
     size_t last_bucket_number;
     do {
@@ -2200,8 +2224,9 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
     } while (routing_table.get_bucket_list().size() != last_bucket_number);
 
     count = routing_table.count();
+    #ifdef KADEMLIA_VERBOSE
     std::cout << "Joined network and found " << count << " existing node" << (count != 1 ? "s." : ".") << std::endl;
-
+    #endif
     return true;
 }
 
@@ -2281,14 +2306,18 @@ int main(int argc, char const *argv[])
                 std::cerr << "Cannot setup Module API server and P2P server on the same port (" << host_module_port << "). Exiting." << std::endl;
                 return -1;
             }
+            #ifdef GENERAL_VERBOSE
             std::cout << "Modules reach this server on " << host_address_string << ":" << host_module_port << std::endl;
             std::cout << "We communicate with peers on " << host_address_string << ":" << host_p2p_port << std::endl;
+            #endif
             if (system(("ping -c1 -s1 " + host_address_string + "  > /dev/null 2>&1").c_str()) != 0) {
                 std::cerr << "Warning: Failed to ping host." << std::endl;
             }
 
             if (vm.contains("peer-address") && vm.contains("peer-port")) {
+            #ifdef GENERAL_VERBOSE
             std::cout << "Trying to connect to existing Network Node " << peer_address_string << ":" << peer_port << std::endl;
+            #endif
                 if (!convert_to_ipv6(peer_address_string, peer_address)) {
                     std::cerr << "Please provide a syntactically correct IP address (v4 or v6) for the peer";
                     return 1;
@@ -2297,7 +2326,9 @@ int main(int argc, char const *argv[])
                     std::cerr << "Warning: Failed to ping peer." << std::endl;
                 }
             } else {
+                #ifdef GENERAL_VERBOSE
                 std::cout << "Since no peer to connect to was supplied, setting up new network..." << std::endl;
+                #endif
                 should_connect_to_network = false;
             }
 
@@ -2360,8 +2391,9 @@ int main(int argc, char const *argv[])
 
 
     // event loop
-
+    #ifdef GENERAL_VERBOSE
     std::cout << "Server running... " << std::endl;
+    #endif
     bool server_is_running = true;
     while (server_is_running) {
         int event_count = epoll_wait(main_epollfd, epoll_events.data(), std::ssize(epoll_events), -1);  // dangerous cast
@@ -2373,7 +2405,7 @@ int main(int argc, char const *argv[])
             if (errno == EINTR) { // for debugging purposes
                 continue;
             }
-            std::cout << "epoll had the error " << errno << std::endl;
+            std::cerr << "epoll had the error " << errno << std::endl;
             server_is_running = false;
             break;
         }
