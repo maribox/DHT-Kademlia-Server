@@ -6,37 +6,39 @@
 
 // #include <print>
 
-
-//TODO: Is this enough?
-bool operator==(const Node& lhs, const Node& rhs) {
-    return lhs.id == rhs.id;
+bool is_same_network_node_or_nodeid(const Node& lhs, const Node& rhs) {
+    return lhs.id == rhs.id ||
+           (lhs.addr == rhs.addr && lhs.port == rhs.port);
 }
 
 KBucket::KBucket(const NodeID& start, const NodeID& end)
     : start(start), end(end), peers(), replacement_cache() {
 }
 
-bool KBucket::add_peer(const Node &peer) { // returns true if inserted or already in the list, else false
+bool KBucket::add_peer(const Node &peer) { // returns true if inserted or already in the list, false if inserted into replacement cache -> split
     // according to 2.2: "Each k-bucket is kept sorted by time last seen—least-recently seen node  at the head, most-recently seen at the tail."
     // therefore, try to find and then move to back
-    auto it = std::find(peers.begin(), peers.end(), peer);
+    auto it = std::ranges::find(peers, peer);
     if (it != peers.end()) {
         peers.erase(it);
         peers.push_back(peer);
+        logTrace("Tried to add existing node {} with ip {}:{} to RoutingTable", key_to_string(peer.id), ip_to_string(peer.addr), peer.port);
         return true;
     }
     if (peers.size() < K) {
         peers.push_back(peer);
+        logDebug("Added new node {} with ip {}:{} to RoutingTable", key_to_string(peer.id), ip_to_string(peer.addr), peer.port);
         return true;
     } else {
         // according to 4.1, we have a replacement cache that gets filled if the K_Bucket is full.
         // "The replacement cache is kept sorted by time last seen, with the most  recently seen entry having the highest priority as a replacement candidate."
         // we keep it sorted in the same way as the peers list, so the last entry is the most recently seen
-        auto it = std::find(replacement_cache.begin(), replacement_cache.end(), peer);
+        auto it = std::ranges::find(replacement_cache, peer);
         if (it != replacement_cache.end()) {
             replacement_cache.erase(it);
         }
         replacement_cache.push_back(peer);
+        logDebug("Added new node {} with ip {}:{} to replacement cache", key_to_string(peer.id), ip_to_string(peer.addr), peer.port);
         return false;
         // TODO: Think about max size of raplcement cache? If yes, remove from front
     }
@@ -65,7 +67,7 @@ bool KBucket::remove(const Node& target_node) {
 }
 
 bool KBucket::contains(const Node &node) {
-    return std::find(peers.begin(), peers.end(), node) != peers.end();
+    return std::ranges::find(peers, node) != peers.end();
 }
 
 NodeID KBucket::get_start() const {
@@ -245,11 +247,11 @@ void RoutingTable::split_bucket(KBucket bucket, int depth) {
 }
 
 
-
 //TODO: implement this. look at sections 2.2, 2.4, 4.2
-void RoutingTable::add_peer(const Node& peer) {
+void RoutingTable::try_add_peer(const Node& peer) {
     // TODO: replace with function
-    if (peer == local_node) {
+    if (is_same_network_node_or_nodeid(local_node, peer)) {
+        logDebug("Tried to add own node to RoutingTable. Returning");
         return;
     }
     for (auto& bucket : bucket_list) {

@@ -32,9 +32,9 @@ void SSLUtils::check_ssl_blocking_mode(SSL *ssl) {
     }
 
     if (NetworkUtils::is_non_blocking(fd)) {
-        logInfo("SSL operations are non-blocking.");
+        logDebug("SSL operations are non-blocking.");
     } else {
-        logInfo("SSL operations are non-blocking.");
+        logDebug("SSL operations are non-blocking.");
     }
 }
 
@@ -536,8 +536,7 @@ bool SSLUtils::extract_custom_id(X509* cert, unsigned char* received_id) {
     // Copy the data to the provided buffer
     std::memcpy(received_id, octet_string->data, 32);
 
-    logDebug("Received ID as hex: ");
-    Utils::print_hex(received_id, 32);
+    logTrace("Received ID as hex: {}", Utils::to_hex_string(received_id, 32));
 
     return true; // Successfully extracted the ID
 }
@@ -685,10 +684,11 @@ SSLStatus SSLUtils::try_ssl_accept(SSL* ssl){
     int ssl_accept_result = SSL_accept(ssl);
     if(ssl_accept_result <= 0){
         int ssl_error = SSL_get_error(ssl, ssl_accept_result);
-        if (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE){
-            return SSLStatus::PENDING_ACCEPT;
-        }
-        else {
+        if (ssl_error == SSL_ERROR_WANT_READ){
+            return SSLStatus::PENDING_ACCEPT_READ;
+        } else if (ssl_error == SSL_ERROR_WANT_WRITE) {
+            return SSLStatus::PENDING_ACCEPT_WRITE;
+        } else {
             return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
         }
     }
@@ -699,10 +699,11 @@ SSLStatus SSLUtils::try_ssl_connect(SSL* ssl){
     int ssl_connect_result = SSL_connect(ssl);
     if(ssl_connect_result <= 0){
         int ssl_error = SSL_get_error(ssl, ssl_connect_result);
-        if (ssl_error == SSL_ERROR_WANT_READ || SSL_ERROR_WANT_WRITE){
-            return SSLStatus::PENDING_CONNECT;
-        }
-        else {
+        if (ssl_error == SSL_ERROR_WANT_READ){
+            return SSLStatus::PENDING_CONNECT_READ;
+        } else if (ssl_error == SSL_ERROR_WANT_WRITE) {
+            return SSLStatus::PENDING_CONNECT_WRITE;
+        } else {
             return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
         }
     }

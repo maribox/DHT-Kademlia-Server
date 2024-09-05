@@ -4,7 +4,6 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <random>
-
 #include "../src/dht_server.cpp"
 
 TEST_CASE("save_to_storage inserts and get_from_storage extracts correct value", "[dht_server]") {

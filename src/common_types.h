@@ -21,6 +21,8 @@ static constexpr size_t KEY_SIZE  = 32;
 static constexpr size_t K = 20;
 static constexpr size_t ALPHA = 3;
 
+bool operator==(const in6_addr & lhs, const in6_addr & rhs);
+
 using Key = std::array<unsigned char,KEY_SIZE>;
 using Value = std::vector<unsigned char>;
 using NodeID = Key;
@@ -29,5 +31,42 @@ struct Node {
     in6_addr addr;
     in_port_t port;
     NodeID id;
+
+    bool operator==(const Node& other) const {
+        return addr == other.addr && port == other.port && id == other.id;
+    }
 };
 
+// for maps
+
+inline std::size_t hash_it(const unsigned char* data, std::size_t size, std::size_t seed) {
+    // Following 6 lines of code taken and adapted from https://stackoverflow.com/a/72073933/14236974
+    for (std::size_t i = 0; i < size; ++i) {
+        unsigned char x = data[i];
+        x = ((x >> 4) ^ x) * 0x45d9f3b;
+        x = ((x >> 4) ^ x) * 0x45d9f3b;
+        x = (x >> 4) ^ x;
+        seed ^= x + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    }
+    return seed;
+}
+
+template <>
+struct std::hash<Value>
+{
+    std::size_t operator()(const std::vector<unsigned char>& vec) const noexcept {
+        std::size_t seed = hash_it(vec.data(), vec.size(), vec.size());
+        return seed;
+    }
+};
+
+template<>
+struct std::hash<Node> {
+    std::size_t operator()(const Node& node) const noexcept {
+        std::size_t seed = 0;
+        seed = hash_it(reinterpret_cast<const unsigned char*>(node.addr.s6_addr), sizeof(node.addr.s6_addr), seed);
+        seed = hash_it(reinterpret_cast<const unsigned char*>(&node.port), sizeof(node.port), seed);
+        seed = hash_it(node.id.data(), node.id.size(), seed);
+        return seed;
+    }
+};

@@ -6,6 +6,13 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "../src/routing.h"
+#include "../src/dht_server.h"
+
+#include <unordered_map>
+#include <unordered_set>
+#include <map>
+#include <set>
+
 
 TEST_CASE("K_Bucket", "[routing]") {
     NodeID start_id = NodeID();
@@ -60,7 +67,7 @@ TEST_CASE("RoutingTable", "[routing]") {
         peerID[0] = 1;
         Node peer = {in6addr_loopback, ServerConfig::P2P_PORT + 2, peerID};
 
-        routing_table.add_peer(peer);
+        routing_table.try_add_peer(peer);
         auto& peers = routing_table.get_bucket_list().at(0).get_peers();
         REQUIRE(peers.size() == 1);
         auto it = peers.begin();
@@ -71,7 +78,7 @@ TEST_CASE("RoutingTable", "[routing]") {
     SECTION("RoutingTable Split Bucket") {
         for (int i = 0; i < K + 1; i++) {
             Node peer = {in6addr_loopback, static_cast<u_short> (ServerConfig::P2P_PORT + 2 + i), generate_random_nodeID()};
-            routing_table.add_peer(peer);
+            routing_table.try_add_peer(peer);
         }
         auto& buckets = routing_table.get_bucket_list();
         REQUIRE(buckets.size() == 2);
@@ -94,7 +101,7 @@ TEST_CASE("RoutingTable", "[routing]") {
     SECTION("Routing Table find_closest_nodes") {
         for (int i = 0; i < K + 1; i++) {
             Node peer = {in6addr_loopback, static_cast<u_short> (ServerConfig::P2P_PORT + 2 + i), generate_random_nodeID()};
-            routing_table.add_peer(peer);
+            routing_table.try_add_peer(peer);
         }
         std::vector<Node> all_nodes;
         for (auto& bucket : routing_table.get_bucket_list()) {
@@ -130,8 +137,8 @@ TEST_CASE("RoutingTable remove peer", "[routing]") {
     peerID2[0] = 1;
     Node peer2 = {in6addr_loopback, static_cast<u_short>(ServerConfig::P2P_PORT + 4), peerID2};
 
-    routing_table.add_peer(peer);
-    routing_table.add_peer(peer2);
+    routing_table.try_add_peer(peer);
+    routing_table.try_add_peer(peer2);
 
     auto& peers = routing_table.get_bucket_list().at(0).get_peers();
     REQUIRE(peers.size() == 2);
@@ -194,3 +201,56 @@ TEST_CASE( "generate_random_nodeID", "[routing]") { // this test was very flaky 
         }
     }
 }
+
+
+TEST_CASE("Node data structure comparison", "[routing]") {
+    // Little side node: This test was mainly done to test sideeffects with using std::map for Nodes.
+    // we now only use unordered_map, because having < comparisons for Nodes proved to be somewhat odd, (and if we only compare
+    // the node id they obviously don't work for different id's/same ip etc.) also now we should have O(1) performance
+
+    NodeID id1 = {0};
+    id1.fill(2);
+    Node node1 = {in6addr_loopback, 8080, id1};
+
+    NodeID different_id = {0};
+    different_id.fill(155);
+    auto different_ip = in6addr_any;
+    different_ip.s6_addr[0] = 22;
+    u_short different_port = 8081;
+
+    std::vector<Node> different_nodes = {
+        Node{different_ip, 8080, id1},
+        Node{in6addr_loopback, different_port, id1},
+        Node{in6addr_loopback, 8080, different_id},
+    };
+
+    std::unordered_map<Node, Node> node_unordered_map(5);
+    std::unordered_set<Node> node_unordered_set(5);
+
+    for (auto& different_node : different_nodes) {
+
+        node_unordered_map[node1] = node1;
+        node_unordered_set.insert(node1);
+        REQUIRE(node_unordered_map.size() == 1);
+        REQUIRE(node_unordered_set.size() == 1);
+
+        node_unordered_map[different_node] = different_node;
+        node_unordered_set.insert(different_node);
+        REQUIRE(node_unordered_map.size() == 2);
+        REQUIRE(node_unordered_set.size() == 2);
+
+        node_unordered_map[different_node] = different_node;
+        node_unordered_set.insert(different_node);
+        REQUIRE(node_unordered_map.size() == 2);
+        REQUIRE(node_unordered_set.size() == 2);
+
+        node_unordered_map[node1] = node1;
+        node_unordered_set.insert(node1);
+        REQUIRE(node_unordered_map.size() == 2);
+        REQUIRE(node_unordered_set.size() == 2);
+
+        node_unordered_map.clear();
+        node_unordered_set.clear();
+    }
+}
+

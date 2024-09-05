@@ -50,6 +50,7 @@ target_link_libraries(testing PRIVATE Catch2::Catch2WithMain ${Boost_LIBRARIES})
 target_link_libraries(routing_tests PRIVATE Catch2::Catch2WithMain ${Boost_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto)
 target_link_libraries(tls_server OpenSSL::SSL OpenSSL::Crypto)
 target_link_libraries(dht_server PRIVATE spdlog::spdlog spdlog::spdlog_header_only)
+target_link_libraries(routing_tests PRIVATE spdlog::spdlog spdlog::spdlog_header_only)
 
 target_link_options(dht_server PRIVATE -no-pie)
 

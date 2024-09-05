@@ -42,16 +42,68 @@
 #include <cstdint>  // for uintptr_t
 using CertificateMap = std::unordered_map<std::string, std::pair<in_port_t,std::string>>; //maps P2P-ID to <port,certificate>
 
-enum SSLStatus{
-    HANDSHAKE_SERVER_WRITE_CERT = -4,   //Server status: Server has not been able to flush certificate (send). Retry until fully flushed.
+enum SSLStatus: int{
+    HANDSHAKE_SERVER_WRITE_CERT = -6,   //Server status: Server has not been able to flush certificate (send). Retry until fully flushed.
     HANDSHAKE_CLIENT_READ_CERT,         //Client status: Client has not been able to receive full server certificate. Retry until fully available.
-    PENDING_ACCEPT,                    //Server status: Transitioned from HANDSHAKE_SERVER_WRITE_CERT. Server has fully flushed certificate. Wants to accept() for the client's connect(). NOTE: SLIGHT AMBIGUITY. Status with PENDING... means that we want to accept next.
-    PENDING_CONNECT,                   //Client status: Transitioned from HANDSHAKE_CLIENT_READ_CERT. Client has fully read certificate. Wants to connect() for the server's accept(). NOTE: SLIGHT AMBIGUITY. Status with PENDING... means that we want to connect next.
+    PENDING_ACCEPT_READ,                    //Server status: Transitioned from HANDSHAKE_SERVER_WRITE_CERT. Server has fully flushed certificate. Wants to accept() for the client's connect(). NOTE: SLIGHT AMBIGUITY. Status with PENDING... means that we want to accept next.
+    PENDING_ACCEPT_WRITE,                    //Server status: Transitioned from HANDSHAKE_SERVER_WRITE_CERT. Server has fully flushed certificate. Wants to accept() for the client's connect(). NOTE: SLIGHT AMBIGUITY. Status with PENDING... means that we want to accept next.
+    PENDING_CONNECT_READ,                   //Client status: Transitioned from HANDSHAKE_CLIENT_READ_CERT. Client has fully read certificate. Wants to connect() for the server's accept(). NOTE: SLIGHT AMBIGUITY. Status with PENDING... means that we want to connect next.
+    PENDING_CONNECT_WRITE,                   //Client status: Transitioned from HANDSHAKE_CLIENT_READ_CERT. Client has fully read certificate. Wants to connect() for the server's accept(). NOTE: SLIGHT AMBIGUITY. Status with PENDING... means that we want to connect next.
     FATAL_ERROR_ACCEPT_CONNECT,         //Universal status: Major malfunction of / deviation from protocol. Error state used to indicate a (near) future tear_down_connection()
-    ACCEPTED = 1 ,                      //Server status: SSL Connection was accepted successfully. Encryption works, we authenticated ourself.
+    ACCEPTED = 1,                      //Server status: SSL Connection was accepted successfully. Encryption works, we authenticated ourself.
     CONNECTED = 2,                      //Client status: SSL Connection was connected successfully. Encryption works, authenticity of peer ensured.
-
 };
+
+#include <fmt/core.h>
+#include <fmt/format.h>
+
+
+template <>
+struct fmt::formatter<SSLStatus> : fmt::formatter<std::string_view> {
+    template <typename ParseContext>
+    constexpr auto parse(ParseContext &ctx) {
+        return ctx.begin();
+    }
+
+    template <typename FormatContext>
+    auto format(const SSLStatus& status, FormatContext &ctx) const {
+        std::string_view name = "unknown";
+        switch (status) {
+            case HANDSHAKE_SERVER_WRITE_CERT:
+                name = "HANDSHAKE_SERVER_WRITE_CERT";
+            break;
+            case HANDSHAKE_CLIENT_READ_CERT:
+                name = "HANDSHAKE_CLIENT_READ_CERT";
+            break;
+            case PENDING_ACCEPT_READ:
+                name = "PENDING_ACCEPT_READ";
+            break;
+            case PENDING_ACCEPT_WRITE:
+                name = "PENDING_ACCEPT_WRITE";
+            break;
+            case PENDING_CONNECT_READ:
+                name = "PENDING_CONNECT_READ";
+            break;
+            case PENDING_CONNECT_WRITE:
+                name = "PENDING_CONNECT_WRITE";
+            break;
+            case FATAL_ERROR_ACCEPT_CONNECT:
+                name = "FATAL_ERROR_ACCEPT_CONNECT";
+            break;
+            case ACCEPTED:
+                name = "ACCEPTED";
+            break;
+            case CONNECTED:
+                name = "CONNECTED";
+            break;
+        }
+        return fmt::formatter<std::string_view>::format(name, ctx);
+    }
+};
+
+
+
+
 
 namespace NetworkUtils {
     bool is_non_blocking(int fd);

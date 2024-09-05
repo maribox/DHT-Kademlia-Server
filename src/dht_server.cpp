@@ -17,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <chrono>
+#include <unordered_set>
 
 //#include "routing.cpp"
 namespace progOpt = boost::program_options;
@@ -70,10 +71,12 @@ int main_epollfd;
 
 // Utility functions
 
-// operator< for use in set.
-// assume that nodes cannot switch ip/port combo when in the network.
-bool operator<(const Node& lhs, const Node& rhs) {
-    return lhs.id < rhs.id;
+
+
+
+
+bool operator==(const in6_addr & lhs, const in6_addr & rhs) {
+    return std::memcmp(lhs.s6_addr, rhs.s6_addr, sizeof(lhs.s6_addr)) == 0;
 }
 
 bool operator<(const Key& lhs, const Key& rhs) {
@@ -109,23 +112,6 @@ bool operator==(const Key& lhs, const Key& rhs) {
     return true;
 }
 
-template <>
-struct std::hash<Value>
-{
-    // Code taken and adapted from https://stackoverflow.com/a/72073933/14236974
-    std::size_t operator()(const std::vector<unsigned char>& vec) const noexcept {
-        std::size_t seed = vec.size();
-        for (auto x : vec) {
-            x = ((x >> 4) ^ x) * 0x45d9f3b;
-            x = ((x >> 4) ^ x) * 0x45d9f3b;
-            x = (x >> 4) ^ x;
-            seed ^= x + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-        }
-
-        return seed;
-    }
-};
-
 bool convert_to_ipv6(const std::string& address_string, struct in6_addr& address) {
     in_addr ipv4_addr{};
     if (inet_pton(AF_INET6, address_string.c_str(), &address) == 1) {
@@ -149,12 +135,7 @@ bool convert_to_ipv6(const std::string& address_string, struct in6_addr& address
 }
 
 std::string key_to_string(const Key &key) {
-    std::string str{};
-
-    for (auto it = key.cbegin() ; it < key.cend(); it++) {
-        str += static_cast<char>(*it);
-    }
-    return str;
+    return Utils::bin_to_hex(key.data(), 32);
 }
 
 std::string ip_to_string(const in6_addr& ip) {
@@ -163,12 +144,12 @@ std::string ip_to_string(const in6_addr& ip) {
     return {ip_str};
 }
 
-bool send_buffer_empty(ConnectionInfo &connection_info){
-    return connection_info.send_bytes.size() == 0;
+bool send_buffer_empty(const ConnectionInfo &connection_info){
+    return connection_info.send_bytes.empty();
 }
 
-bool recv_buffer_empty(ConnectionInfo &connection_info){
-    return connection_info.receive_bytes.size() == 0;
+bool recv_buffer_empty(const ConnectionInfo &connection_info){
+    return connection_info.receive_bytes.empty();
 }
 
 
@@ -194,7 +175,7 @@ void read_vector_from_recvbuf(ConnectionInfo &connection_info, Message &to_recv)
 //TODO: Test if purger stop works
 //Periodically purges local_storage
 void purge_local_storage(std::chrono::seconds sleep_period){
-    logInfo("New thread for purge_local_storage started. Will run forever.");
+    logDebug("New thread for purge_local_storage started. Will run forever.");
     while (true) {
         std::unique_lock<std::mutex> lk(stop_purger_cv_mutex);
         if (stop_purger_cv.wait_for(lk, sleep_period) == std::cv_status::timeout){
@@ -538,7 +519,7 @@ Key read_rpc_header(const Message& message, in6_addr peer_ip) {
     auto peer = Node{peer_ip, sender_port, sender_node_id};
     if (!routing_table.contains(peer)) {
         logInfo("Got contacted by new peer reachable at {}:{}", ip_to_string(peer.addr), sender_port);
-        routing_table.add_peer(peer);
+        routing_table.try_add_peer(peer);
     }
 
     return rpc_id;
@@ -556,6 +537,7 @@ void send_DHT_message(socket_t socketfd, const Message &message, int epollfd) {
     if (!message.empty()) {
         write_vector_to_sendbuf(connection_map[socketfd], message);
     }
+    logTrace("Wrote data to sendbuffer for sending DHT message");
     // will be sent with next epoll wait
 
     if (epollfd == -1) {
@@ -581,23 +563,32 @@ bool check_rpc_id(const Message &message, const Key &correct_rpc_id) {
 
 // crawling
 
-bool process_answers(int epollfd, P2PType expected_type, std::function<bool(socket_t, u_short)> handle_answer, size_t expected_responses = 1) {
+int process_answers_on_epollin(int epollfd, P2PType expected_type, std::function<bool(socket_t, u_short)> handle_answer, int expected_responses = 1, int timeout_ms = 5000) {
     std::vector<epoll_event> epoll_events{64};
-
-    while(expected_responses > 0) {
-        int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), 5000);
-        if (event_count != -1) {
+    logTrace("Waiting on {} answers...", expected_responses);
+    int received_responses = 0;
+    while(received_responses < expected_responses) {
+        int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), timeout_ms);
+        if (event_count == -1) {
+            logError("Had epoll error while waiting on {} answers", expected_responses);
+            return received_responses;
+        } else if (event_count == 0) { // timed out
+            break;
+        } else {
             for (int i = 0; i < event_count; i++) {
                 auto current_event = epoll_events[i];
                 if (!(current_event.events & EPOLLIN)) {
-                    continue;
+                    logError("Set wrong EPOLL flag on epollfd");
+                    return false;
                 }
                 if (!read_EPOLLIN(epollfd, current_event)) {
+                    logTrace("process_answers_on_epollin: couldn't read on socket. Invalidated.");
                     continue;
                 }
 
                 socket_t sockfd = epoll_events[i].data.fd;
                 if (!connection_map.contains(sockfd)) {
+                    logTrace("Received response on socket that's not in the connection_map. This shouldn't happen.");
                     continue;
                 }
                 auto& connection_info = connection_map[sockfd];
@@ -611,60 +602,43 @@ bool process_answers(int epollfd, P2PType expected_type, std::function<bool(sock
                         continue;
                     }
 
-                    expected_responses--;
+                    received_responses++;
                     // potential error source when multiple responses from same source (shouldn't happen, but could)
                     close(sockfd);
                     connection_map.erase(sockfd);
                 }
             }
-        } else {
-            return false;
         }
     }
-    return true;
+    logTrace("process_answers_on_epollin: Received {} answer{}", received_responses, (received_responses != 1 ? "s" : ""));
+    return received_responses;
 }
 
 std::vector<Node> blocking_node_lookup(Key &key, size_t number_of_nodes) {
-    std::vector<Node> closest_nodes = routing_table.find_closest_nodes(key);
-    std::set<Node> returned_nodes{};
+    std::vector<Node> sorted_closest_nodes = routing_table.find_closest_nodes(key);
+    std::unordered_set<Node> returned_nodes{};
     int epollfd = epoll_create1(0);
-    std::set<Node> previous_k_closest_nodes{};
-
-
-    //logInfo("Trying to find neighbours of a key starting with '{:x}{:x}'...", key[0], key[1]);
+    std::unordered_set<Node> previous_k_closest_nodes{};
+    std::unordered_set<Node> new_k_closest_nodes{};
+    logInfo("Trying to find neighbours of key '{}'", key_to_string(key));
 
     while (true) {
-        // TODO
-        bool found_new_nodes = false;
-
-        for (const auto& node : closest_nodes) {
-            if (!previous_k_closest_nodes.contains(node)) {
-                found_new_nodes = true;
-                previous_k_closest_nodes.insert(node);
-                if (previous_k_closest_nodes.size() >= K) {
-                    break;
-                }
-            }
-        }
-        if (!found_new_nodes) {
-            break;
-        }
-
         int expected_answers = 0;
 
-        if (closest_nodes.size() > ALPHA) {
-            closest_nodes.resize(ALPHA);
+        if (sorted_closest_nodes.size() > ALPHA) {
+            sorted_closest_nodes.resize(ALPHA);
         }
 
-        for (auto& node: closest_nodes) {
-            if (node.port != 0 && node != routing_table.get_local_node()) {
+        for (auto& node: sorted_closest_nodes) {
+            if (!is_same_network_node_or_nodeid(node, routing_table.get_local_node())) {
                 socket_t peer_socket = setup_connect_socket(epollfd, node.addr, node.port, ConnectionType::P2P);
                 if (peer_socket != -1) {
-                    setup_epollin(epollfd, peer_socket);
                     if (!ensure_tls_blocking(peer_socket)) {
                         routing_table.remove(node);
                         continue;
                     }
+                    add_epoll(epollfd, peer_socket, EPOLLIN);
+                    mod_epoll(epollfd, peer_socket, EPOLLIN);
                     auto sent = forge_DHT_RPC_find_node(peer_socket, epollfd, key);
                     auto [is_socket_still_up ,everything_was_sent] = flush_sendbuf(peer_socket, connection_map[peer_socket], epollfd);
                     if (is_socket_still_up && everything_was_sent) {
@@ -683,23 +657,43 @@ std::vector<Node> blocking_node_lookup(Key &key, size_t number_of_nodes) {
             return handle_DHT_RPC_find_node_reply(sockfd, message_size, &returned_nodes);
         };
 
-        process_answers(epollfd, P2PType::DHT_RPC_FIND_NODE_REPLY, handle_answer, expected_answers);
+        process_answers_on_epollin(epollfd, P2PType::DHT_RPC_FIND_NODE_REPLY, handle_answer, expected_answers);
 
         for (const auto& node : returned_nodes) { // add new nodes to closest nodes
-            if (std::ranges::find(closest_nodes, node) == closest_nodes.end()) {
-                closest_nodes.push_back(node);
+            if (std::ranges::find(sorted_closest_nodes, node) == sorted_closest_nodes.end()) {
+                sorted_closest_nodes.push_back(node);
             }
         }
 
         returned_nodes.clear();
 
-        std::ranges::sort(closest_nodes,
+        std::ranges::sort(sorted_closest_nodes,
                           [key](const Node& node_1, const Node& node_2){return RoutingTable::node_distance(node_1.id, key) < RoutingTable::node_distance(node_2.id, key);}
         );
-    }
+        bool found_new_nodes = false;
+        new_k_closest_nodes = std::unordered_set<Node>{};
 
-    //logInfo("Lookup completed. Found {} closest nodes.", closest_nodes.size());
-    return closest_nodes;
+        for (const auto& node : sorted_closest_nodes) {
+            if (!previous_k_closest_nodes.contains(node)) {
+                found_new_nodes = true;
+            }
+            new_k_closest_nodes.insert(node);
+            if (new_k_closest_nodes.size() >= number_of_nodes) {
+                break;
+            }
+        }
+        previous_k_closest_nodes = new_k_closest_nodes;
+        if (!found_new_nodes) {
+            break;
+        }
+    }
+    if (sorted_closest_nodes.size() > number_of_nodes) {
+        logInfo("Lookup completed. Found {} closest nodes. Resizing to {}", sorted_closest_nodes.size(), number_of_nodes);
+        sorted_closest_nodes.resize(number_of_nodes);
+    } else {
+        logInfo("Lookup completed. Found {} out of {} closest nodes that were looked for.", sorted_closest_nodes.size(), number_of_nodes);
+    }
+    return sorted_closest_nodes;
 }
 
 void crawl_blocking_and_store(Key &key, Value &value, const int time_to_live, int replication) {
@@ -711,7 +705,7 @@ void crawl_blocking_and_store(Key &key, Value &value, const int time_to_live, in
         }
 
         if (node == routing_table.get_local_node()) {
-            logInfo("Stored key '{}' with value '{}' to own storage", key_to_string(key), value.data());
+            logInfo("Stored key '{}' with value '{}' to own storage", key_to_string(key), Utils::bin_to_hex(value.data(), value.size()));
             save_to_storage(key, std::chrono::seconds(time_to_live), value);
             continue;
         }
@@ -720,6 +714,7 @@ void crawl_blocking_and_store(Key &key, Value &value, const int time_to_live, in
         /* Commented out for compilation. setup_connect_socket now needs an epoll instance...
         *socket_t sockfd = setup_connect_socket(node.addr, node.port, ConnectionType::P2P);
         */
+        // TODO: fix with new mechanism
         if (sockfd != -1) {
             forge_DHT_RPC_store(sockfd, main_epollfd, time_to_live, key, value);
         }
@@ -731,7 +726,7 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
 
     auto found_values = std::vector<Value>{};
     int epollfd = epoll_create1(0);
-    size_t expected_answers = 0;
+    int expected_answers = 0;
     for (auto& node : k_closest_nodes) {
         if (node.port == 0) {
             continue;
@@ -750,7 +745,7 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
         socket_t sockfd = setup_connect_socket(epollfd, node.addr, node.port, {ConnectionType::P2P});
         socket_t peer_socket = setup_connect_socket(epollfd, node.addr, node.port, ConnectionType::P2P);
         if (peer_socket != -1) {
-            setup_epollin(epollfd, peer_socket);
+            add_epoll(epollfd, peer_socket, EPOLLIN);
             if (!ensure_tls_blocking(peer_socket)) {
                 routing_table.remove(node);
                 continue;
@@ -771,7 +766,7 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
         return handle_DHT_RPC_find_value_reply(sockfd, message_size, &found_values);
     };
 
-    process_answers(epollfd, P2PType::DHT_RPC_FIND_VALUE_REPLY, handle_answer, expected_answers);
+    process_answers_on_epollin(epollfd, P2PType::DHT_RPC_FIND_VALUE_REPLY, handle_answer, expected_answers);
 
     std::map<Value, int> frequency;
     for (auto& value : found_values) {
@@ -824,7 +819,7 @@ bool handle_DHT_put(socket_t socket, u_short body_size) {
     Value value{};
     value.resize(value_size);
     read_body(message, 4 + KEY_SIZE, value.data(), value_size);
-    logInfo("Got request to set key '{}' to value '{}'", key_to_string(key), value.data());
+    logInfo("Got request to set key '{}' to value '{}'", key_to_string(key), Utils::bin_to_hex(value.data(), value.size()));
     std::thread([key, value, time_to_live, replication]() mutable {
         crawl_blocking_and_store(key, value, time_to_live, replication);
     }).detach();
@@ -856,6 +851,8 @@ bool forge_DHT_success(socket_t socket, int epollfd, const Key &key, const Value
     build_DHT_header(message, message_size, DHT_SUCCESS);
     write_body(message, 0, key.data(), KEY_SIZE);
     write_body(message, KEY_SIZE, value.data(), value.size());
+
+    logTrace("Sending DHT success back");
     //TODO: Pass epollfds to methods that write.
     send_DHT_message(socket, message, epollfd);
     return true;
@@ -872,6 +869,7 @@ bool forge_DHT_failure(socket_t socket, int epollfd, Key &key) {
     build_DHT_header(message, message_size, DHT_FAILURE);
     write_body(message, 0, key.data(), KEY_SIZE);
 
+    logTrace("Sending DHT failure back");
     send_DHT_message(socket, message, epollfd);
     return true;
 }
@@ -895,6 +893,7 @@ bool forge_DHT_RPC_ping(socket_t socket, int epollfd) {
     build_DHT_header(message, message_size, message_type);
     build_RPC_header(message, rpc_id);
 
+    logTrace("Sending DHT RPC ping");
     send_DHT_message(socket, message, epollfd);
     return true;
 }
@@ -915,11 +914,12 @@ bool forge_DHT_RPC_ping_reply(socket_t socket, int epollfd, Key rpc_id) {
     build_DHT_header(message, message_size, message_type);
     build_RPC_header(message, rpc_id);
 
+    logTrace("Sending DHT RPC ping reply");
     send_DHT_message(socket, message, epollfd);
     return true;
 }
 
-bool handle_DHT_RPC_ping_reply(const socket_t socket, const u_short body_size, std::set<socket_t>* successfully_pinged_sockets) {
+bool handle_DHT_RPC_ping_reply(const socket_t socket, const u_short body_size, std::unordered_set<socket_t>* successfully_pinged_sockets) {
     const Message& message = connection_map[socket].receive_bytes;
     if (!check_rpc_id(message, connection_map[socket].rpc_id)) {
         return false;
@@ -947,6 +947,7 @@ bool forge_DHT_RPC_store(socket_t socket, int epollfd, u_short time_to_live, Key
     write_body(message, RPC_SUB_HEADER_SIZE + 2, key.data(), KEY_SIZE);
     write_body(message, RPC_SUB_HEADER_SIZE + 2 + KEY_SIZE, value.data(), value.size());
 
+    logTrace("Sending DHT RPC store");
     send_DHT_message(socket, message, epollfd);
     return true;
 }
@@ -991,6 +992,7 @@ bool forge_DHT_RPC_store_reply(socket_t socket, int epollfd, Key rpc_id, Key &ke
     write_body(message, RPC_SUB_HEADER_SIZE, key.data(), KEY_SIZE);
     write_body(message, RPC_SUB_HEADER_SIZE + KEY_SIZE, value.data(), value.size());
 
+    logTrace("Sending DHT RPC store reply");
     send_DHT_message(socket, message, epollfd);
     return true;
 }
@@ -1045,58 +1047,71 @@ bool forge_DHT_RPC_find_node(socket_t socket, int epollfd, NodeID target_node_id
 
     write_body(message, RPC_SUB_HEADER_SIZE, target_node_id.data(), NODE_ID_SIZE);
 
+    logTrace("Sending DHT RPC find node");
     send_DHT_message(socket, message, epollfd);
     return true;
 }
 
-bool perform_maintenance() {
+std::unordered_set<Node> perform_maintenance() {
     int epollfd = epoll_create1(0);
     if (epollfd == -1) {
         logError("Error creating epollfd. Aborting maintenance.");
-        return false;
+        return {};
     }
     logInfo("Performing maintenance...");
-
-    size_t expected_answers = 0;
-    auto pinged_sockets_map = std::map<socket_t, Node>{};
+    epoll_event epollEvent;
+    std::unordered_set<Node> stale_nodes;
+    int expected_answers = 0;
+    auto pinged_sockets_map = std::unordered_map<socket_t, Node>{};
     for (auto& bucket : routing_table.get_bucket_list()) {
         for (auto& node : bucket.get_peers()) {
             socket_t peer_socket = setup_connect_socket(epollfd, node.addr, node.port, ConnectionType::P2P);
             if (peer_socket != -1) {
-                setup_epollin(epollfd, peer_socket);
                 if (!ensure_tls_blocking(peer_socket)) {
-                    routing_table.remove(node);
+                    stale_nodes.insert(node);
                     continue;
                 }
+                epollEvent = epoll_event{};
+                epollEvent.events = EPOLLIN;
+                epollEvent.data.fd = peer_socket;
+                if (epoll_ctl(epollfd, EPOLL_CTL_ADD, peer_socket, &epollEvent) == -1) {
+                    stale_nodes.insert(node);
+                    continue;
+                };
                 auto sent = forge_DHT_RPC_ping(peer_socket, epollfd);
+                logTrace("Sent ping to {}:{}", ip_to_string(node.addr), node.port);
                 auto [is_socket_still_up ,everything_was_sent] = flush_sendbuf(peer_socket, connection_map[peer_socket], epollfd);
                 if (is_socket_still_up && everything_was_sent) {
                     pinged_sockets_map[peer_socket] = node;
                     expected_answers++;
                 } else {
-                    routing_table.remove(node);
+                    stale_nodes.insert(node);
                 }
             } else {
-                routing_table.remove(node);
+                stale_nodes.insert(node);
             }
         }
     }
 
-    std::set<socket_t> successfully_pinged_sockets{};
+    logTrace("perform_maintenance: Sent pings, now waiting on answers...");
+
+    std::unordered_set<socket_t> successfully_pinged_sockets{};
     auto handle_answer = [&](socket_t sockfd, u_short body_size) {
         return handle_DHT_RPC_ping_reply(sockfd, body_size, &successfully_pinged_sockets);
     };
-    bool success = process_answers(epollfd, P2PType::DHT_RPC_FIND_NODE_REPLY, handle_answer, expected_answers);
-    if (success) {
-        for (auto& [sockfd, node] : pinged_sockets_map) {
-            if (!successfully_pinged_sockets.contains(sockfd)) {
-                routing_table.remove(node);
-            }
+    int received_answers = process_answers_on_epollin(epollfd, P2PType::DHT_RPC_PING_REPLY, handle_answer, expected_answers);
+
+
+    for (auto& [sockfd, node] : pinged_sockets_map) {
+        if (!successfully_pinged_sockets.contains(sockfd)) {
+            stale_nodes.insert(node);
         }
-        return true;
-    } else {
-        return false;
     }
+    logInfo("Finished maintenance and found {}/{} stale nodes. Removed them.", stale_nodes.size(), routing_table.count());
+    for (auto& stale_node : stale_nodes) {
+        routing_table.remove(stale_node);
+    }
+    return stale_nodes;
 }
 
 bool handle_DHT_RPC_find_node(const socket_t socket, const u_short body_size) {
@@ -1133,12 +1148,13 @@ bool forge_DHT_RPC_find_node_reply(socket_t socket, int epollfd, Key rpc_id, std
         write_body(message, RPC_SUB_HEADER_SIZE + i*NODE_SIZE + 16 + 2, node.id.data(), 32);
     }
 
+    logTrace("Sending Find node reply");
     send_DHT_message(socket, message, epollfd);
     return true;
 }
 
 
-bool handle_DHT_RPC_find_node_reply(const socket_t socket, const u_short body_size, std::set<Node>* closest_nodes_ptr, std::mutex* returned_nodes_mutex_ptr) {
+bool handle_DHT_RPC_find_node_reply(const socket_t socket, const u_short body_size, std::unordered_set<Node>* closest_nodes_ptr, std::mutex* returned_nodes_mutex_ptr) {
     if ((body_size - RPC_SUB_HEADER_SIZE) % NODE_SIZE != 0) {
         return false;
     }
@@ -1151,7 +1167,7 @@ bool handle_DHT_RPC_find_node_reply(const socket_t socket, const u_short body_si
 
     bool created_closest_nodes = false;
     if (!closest_nodes_ptr) {
-        closest_nodes_ptr = new std::set<Node>();
+        closest_nodes_ptr = new std::unordered_set<Node>();
         created_closest_nodes = true;
     }
 
@@ -1166,12 +1182,10 @@ bool handle_DHT_RPC_find_node_reply(const socket_t socket, const u_short body_si
             std::lock_guard<std::mutex> lock(*returned_nodes_mutex_ptr);
         }
         closest_nodes_ptr->insert(node);
-        if (node.id != routing_table.get_local_node().id) {
-            routing_table.add_peer(node);
-        }
+        routing_table.try_add_peer(node);
     }
 
-    // logInfo("Got back {} node{}", closest_nodes_ptr->size(), (closest_nodes_ptr->size() != 1 ? "s." : "."));
+    logTrace("Got back {} node{} from RPC find node reply", closest_nodes_ptr->size(), (closest_nodes_ptr->size() != 1 ? "s" : ""));
 
     if (created_closest_nodes) {
         delete(closest_nodes_ptr);
@@ -1194,6 +1208,7 @@ bool forge_DHT_RPC_find_value(socket_t socket, int epollfd, Key &key) {
 
     write_body(message, RPC_SUB_HEADER_SIZE, key.data(), KEY_SIZE);
 
+    logTrace("Sending DHT RPC find value");
     send_DHT_message(socket, message, epollfd);
     return true;
 }
@@ -1230,6 +1245,7 @@ bool forge_DHT_RPC_find_value_reply(socket_t socket, int epollfd, Key rpc_id, co
     write_body(message, RPC_SUB_HEADER_SIZE, key.data(), KEY_SIZE);
     write_body(message, RPC_SUB_HEADER_SIZE + KEY_SIZE, value.data(), value.size());
 
+    logTrace("Sending DHT RPC find value reply");
     send_DHT_message(socket, message, epollfd);
     return true;
 }
@@ -1267,6 +1283,7 @@ bool forge_DHT_error(socket_t socket, int epollfd, ErrorType error) {
     u_short network_order_error = htons(error);
     write_body(message, 0, reinterpret_cast<unsigned char*>(&network_order_error), 2);
 
+    logTrace("Sending DHT error");
     send_DHT_message(socket, message, epollfd);
     return true;
 }
@@ -1285,16 +1302,16 @@ bool handle_DHT_error(const socket_t socket, const u_short body_size) {
                              ":" + std::to_string(connection_map[socket].client_port);
     switch (error_type) {
         case ErrorType::DHT_NOT_FOUND:
-            spdlog::error("Received DHT_NOT_FOUND error by {}", addr_string);
+            logError("Received DHT_NOT_FOUND error by {}", addr_string);
         break;
         case ErrorType::DHT_BAD_REQUEST:
-            spdlog::error("Sent out bad request to {}", addr_string);
+            logError("Sent out bad request to {}", addr_string);
         break;
         case ErrorType::DHT_SERVER_ERROR:
-            spdlog::error("Had internal server error with {}", addr_string);
+            logError("Had internal server error with {}", addr_string);
         break;
         default:
-            spdlog::error("Got invalid server error by {}", addr_string);
+            logError("Got invalid server error by {}", addr_string);
     }
     return true;
 }
@@ -1405,7 +1422,6 @@ ProcessingStatus try_processing(socket_t curfd){
     if(connection_buffer.size() < HEADER_SIZE){
         return ProcessingStatus::WAIT_FOR_COMPLETE_MESSAGE_HEADER;
     }
-
         //Parse header:
         u_short message_size = -1;
         u_short dht_type = -1;
@@ -1450,10 +1466,12 @@ ProcessingStatus try_processing(socket_t curfd){
         return ProcessingStatus::ERROR;
     }
     if (byte_count_to_process > message_size) {
+        logTrace("Found more messages on connection_buffer");
         connection_buffer.erase(connection_buffer.begin(), connection_buffer.begin() + message_size);
         return MORE_TO_READ;
     }
     if (valid_request) {
+        logTrace("Processed valid request");
         return ProcessingStatus::PROCESSED;
     } else {
         logError("Unknown Error with request.");
@@ -1637,7 +1655,8 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
                 }
                 logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                 return true;
-            case SSLStatus::PENDING_ACCEPT:
+            case SSLStatus::PENDING_ACCEPT_READ:
+            case SSLStatus::PENDING_ACCEPT_WRITE:
                 connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
                 logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                 return true;
@@ -1684,7 +1703,8 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
                 //Certificate is not fully present yet. Return true, try again later.
             logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                 return true;
-            case SSLStatus::PENDING_CONNECT:
+            case SSLStatus::PENDING_CONNECT_READ:
+            case SSLStatus::PENDING_CONNECT_WRITE:
                 connection_info.ssl_stat = SSLUtils::try_ssl_connect(connection_info.ssl);
                 logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                 return true;
@@ -1716,6 +1736,8 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
 
 bool handle_EPOLLOUT(int epollfd, const epoll_event &current_event){
     //Check connection type
+    //TODO: currently for debugging
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     socket_t socketfd = current_event.data.fd;
     if (!connection_map.contains(socketfd)) {
         tear_down_connection(main_epollfd, socketfd);
@@ -1738,7 +1760,10 @@ bool handle_EPOLLOUT(int epollfd, const epoll_event &current_event){
     logTrace("handle_EPOLLOUT: handle_custom_ssl_protocol has possibly advanced our SSL state to: {}",connection_info.ssl_stat);
 
     //flush send_buffer.
-    auto [socket_still_up, _ ]  = flush_sendbuf(socketfd,connection_info,epollfd);
+    auto [socket_still_up, was_everything_sent ]  = flush_sendbuf(socketfd,connection_info,epollfd);
+    if (was_everything_sent) {
+        logTrace("The sendbuffer buffer is empty and there's nothing to send anymore.");
+    }
     return socket_still_up;
 }
 
@@ -1795,9 +1820,17 @@ bool handle_EPOLLIN(int epollfd, const epoll_event& current_event) { // returns 
 
 // Network/Socket functions
 
-int setup_epollin(int epollfd, socket_t serversocket) {
+int add_epoll(int epollfd, socket_t serversocket, uint32_t events) {
+    epoll_event epollEvent = epoll_event{};
+    epollEvent.events = events;
+    epollEvent.data.fd = serversocket;
+    epoll_ctl(epollfd, EPOLL_CTL_ADD, serversocket, &epollEvent);
+    return epollfd;
+}
+
+int mod_epoll(int epollfd, socket_t serversocket, uint32_t events) {
     auto epollEvent = epoll_event{};
-    epollEvent.events = EPOLLIN;
+    epollEvent.events = events;
     epollEvent.data.fd = serversocket;
     epoll_ctl(epollfd, EPOLL_CTL_ADD, serversocket, &epollEvent);
     return epollfd;
@@ -1871,7 +1904,7 @@ socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t po
 
     connection_map[peer_socket] = connection_info;
     auto &connection_info_emplaced = connection_map[peer_socket];
-    logTrace("setup_connect_socket: added newly accepted peer to global connection_map.");
+    logTrace("setup_connect_socket: added newly connected peer to global connection_map.");
 
     //Inject SSL-Code:
     if(connection_type == ConnectionType::P2P){
@@ -1897,14 +1930,14 @@ socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t po
         if(cert_stat == CertificateStatus::ERRORED_CERTIFICATE || cert_stat == CertificateStatus::KNOWN_CERTIFICATE_CONTENT_MISMATCH){
             //Abort the connection. Could be a malicious Peer! Abort, abort!
             tear_down_connection(epollfd,peer_socket);
-            logInfo("setup_connect_socket: Receiving certificate from server was faulty, e.g. syntactically/ corrupted OR attemt to spoof Identity of well-known peer");
+            logWarn("setup_connect_socket: Receiving certificate from server was faulty, e.g. syntactically/ corrupted OR attemt to spoof Identity of well-known peer");
             return -1;
         }
         if(cert_stat == CertificateStatus::CERTIFICATE_NOT_FULLY_PRESENT){
-            logInfo("setup_connect_socket: Received certificate is not fully present yet. Wait for more bytes.");
+            logTrace("setup_connect_socket: Received certificate is not fully present yet. Wait for more bytes.");
             return peer_socket; //fd is valid, but wait for more bytes.
         }
-        logInfo("setup_connect_socket: Received certificate is in a valid state. Now, try_ssl_connect()");
+        logTrace("setup_connect_socket: Received certificate is in a valid state. Now, try_ssl_connect()");
         //Else: cert_stat is either NEW_VALID_CERTIFICATE  or EXPECTED_CERTIFICATE, continue with protocol.
         //New certificate saved or recognized previously trusted certificate.
         //Advance to at least SSLStatus::AWAITING_ACCEPT :)
@@ -1943,7 +1976,7 @@ void prepare_SSL_Config(/*in_port_t host_p2p_port*/){
         exit(EXIT_FAILURE);
     }
 
-    logInfo("Generated Kademlia Node ID as hex: {}", Utils::to_hex_string(SSLConfig::id.data(), 32));
+    logInfo("Generated Kademlia Node ID: {}", Utils::to_hex_string(SSLConfig::id.data(), 32));
 
     //Retrieve own IPv6 ip to include in certificate:
 
@@ -2041,11 +2074,6 @@ socket_t set_socket_blocking(socket_t peer_socket, bool blocking) {
     return peer_socket;
 }
 
-socket_t setup_connect_socket_blocking(int epollfd, struct in6_addr peer_address, u_short peer_port) {
-    socket_t peer_socket = setup_connect_socket(epollfd, peer_address, peer_port, {ConnectionType::P2P});
-    return set_socket_blocking(peer_socket, true);
-}
-
 void force_close_socket(int sockfd) {
     struct linger linger_option = {1, 0};  // Enable SO_LINGER with a timeout of 0
     if (setsockopt(sockfd, SOL_SOCKET, SO_LINGER, &linger_option, sizeof(linger_option)) < 0) {
@@ -2088,21 +2116,50 @@ bool run_with_timeout(Function&& func, std::chrono::seconds timeout, Args&&... a
     }
 }
 
-bool ensure_tls_blocking(socket_t peer_socket, std::chrono::seconds timeout_sec) {
-    logTrace("setup_tls_blocking: called setup_tls_blocking with local peer filedescriptor {}",peer_socket);
+bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms) {
+    logTrace("setup_tls_blocking: called setup_tls_blocking with local peer filedescriptor {}", peer_socket);
     set_socket_blocking(peer_socket, false);
 
-    int epollfd = epoll_create1(0);
-    auto epollEvent = epoll_event{};
-    epollEvent.events = EPOLLIN | EPOLLOUT | EPOLLERR;
-    epollEvent.data.fd = peer_socket;
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, peer_socket, &epollEvent);
+
     std::vector<epoll_event> epoll_events{64};
     auto start_time = std::chrono::steady_clock::now();
+    if (!connection_map.contains(peer_socket)) {
+        return false;
+    }
 
-    int tries = 0;
+
+    int epollfd = epoll_create1(0);
+    add_epoll(epollfd, peer_socket, EPOLLIN | EPOLLOUT);
+
+    auto& connection_info = connection_map[peer_socket];
+    int active_polling_rate_ms = 10;
+    int max_tries = timeout_ms / active_polling_rate_ms;
+    int current_tries = 0;
     while (true) { // event count never -1 because epollout.
+        switch(connection_info.ssl_stat) {
+            case CONNECTED:
+            case ACCEPTED:
+                logDebug("setup_tls_blocking: Setup TLS Connection established.");
+                logTrace("setup_tls_blocking: returning successfully.");
+            return true;
+            case PENDING_CONNECT_READ:
+            case PENDING_ACCEPT_READ:
+                epollfd = mod_epoll(epollfd, peer_socket, EPOLLIN);
+            break;
+            case PENDING_CONNECT_WRITE:
+            case PENDING_ACCEPT_WRITE:
+                epollfd = mod_epoll(epollfd, peer_socket, EPOLLOUT);
+            break;
+            case HANDSHAKE_SERVER_WRITE_CERT: // Trying to connect to maybe inactive server -> sleep
+            case HANDSHAKE_CLIENT_READ_CERT:
+            break;
+            case FATAL_ERROR_ACCEPT_CONNECT:
+                logTrace("Fatal error on TLS Connection ACCEPT/CONNECT");
+                return false;
+        }
+
         int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), 5000);  // dangerous cast
+        logTrace("ensure_tls_blocking: new epoll event. Current SSL state: {}", connection_info.ssl_stat);
         if (event_count == -1) {
             if (errno == EINTR) { // for debugging purposes
                 continue;
@@ -2111,42 +2168,20 @@ bool ensure_tls_blocking(socket_t peer_socket, std::chrono::seconds timeout_sec)
             logError("Couldn't build TLS tunnel: {}", strerror(errno));
             return false;
         }
-        for (int i = 0; i < event_count; ++i) {
-            const epoll_event &current_event = epoll_events[i];
-            bool socket_still_valid = true;
-            if (!connection_map.contains(current_event.data.fd)) {
-                logError("setup_tls_blocking: Socket that notified us via epollIn that is not in our connection_map. Should be avoided.");
-                //TODO: Ask Marius about the viability of the next line
-                epoll_ctl(epollfd, EPOLL_CTL_DEL, current_event.data.fd, NULL);
-                continue;
-            }
-            // handle client processing of existing sessions
-            if (connection_map[current_event.data.fd].ssl_stat == SSLStatus::CONNECTED) {
-                logDebug("setup_tls_blocking: Setup TLS Connection established.");
-                logTrace("setup_tls_blocking: returning successfully.");
-                return true;
-            }
-            if (current_event.events & EPOLLIN)
-                logTrace("setup_tls_blocking: EPOLLIN event triggered");
-                socket_still_valid = handle_EPOLLIN(epollfd,current_event);
-            if (socket_still_valid && current_event.events & EPOLLOUT)
-                //Omitted logging as EPOLL gets triggered on every iteration
-                socket_still_valid = handle_EPOLLOUT(epollfd,current_event);
-            if (socket_still_valid && current_event.events & EPOLLERR){
-                logTrace("setup_tls_blocking: EPOLLERR event triggered");
-                tear_down_connection(epollfd,current_event.data.fd);
-            }
-        }
-        auto current_time = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
-        if (elapsed > timeout_sec) {
-            logDebug("setup_tls_blocking: Setup TLS Connection could not be established.");
-            tear_down_connection(epollfd, peer_socket);
-            logTrace("setup_tls_blocking: returning unsuccessfully.");
+        if (!handle_custom_ssl_protocol(epollfd, peer_socket, connection_info) || current_tries > max_tries) {
+            logTrace("ensure_tls_blocking: handle_custom_ssl_protocol returned false.");
             return false;
         }
+        if (connection_info.ssl_stat == CONNECTED || connection_info.ssl_stat == ACCEPTED) {
+            logDebug("setup_tls_blocking: Setup TLS Connection established.");
+            logTrace("setup_tls_blocking: returning successfully.");
+            return true;
+        }
+        current_tries++;
+        std::this_thread::sleep_for(std::chrono::milliseconds(active_polling_rate_ms));
     }
 }
+
 
 bool wait_on_find_node_reply(socket_t peer_socket) {
     std::vector<epoll_event> epoll_events{64};
@@ -2202,12 +2237,11 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
 
     //Create custom epoll loop for connect_to_network
     int epollfd = epoll_create1(0);
-    socket_t peer_socket = setup_connect_socket_blocking(epollfd, peer_address, peer_port);
+    socket_t peer_socket = setup_connect_socket(epollfd, peer_address, peer_port, {ConnectionType::P2P});
     logDebug("connect_to_network: The TCP setup of the socket to peer was {}", peer_socket == -1? "unsuccessful" : "successful");
-    setup_epollin(epollfd, peer_socket);
+    add_epoll(epollfd, peer_socket, EPOLLIN);
 
-    //TODO: @Marius 300s only for debugging?
-    bool ssl_success = ensure_tls_blocking(peer_socket, 300s);
+    bool ssl_success = ensure_tls_blocking(peer_socket);
     logDebug("connect_to_network: The TLS setup of the socket to peer was {}", ssl_success? "successful" : "unsucessful");
     if (peer_socket == -1 || epollfd == -1 || !ssl_success) {
         logError("connect_to_network: failed initial setup (ssl handshake or epoll)");
@@ -2218,19 +2252,19 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
 
     logInfo("Sending Find Node Request...");
     if (!forge_DHT_RPC_find_node(peer_socket, epollfd, routing_table.get_local_node().id)) {
-        //TODO: @Marius, do we need to abort here or proceed differently?
         logError("connect_to_network: Couldn't send Find Node Request during bootstrapping, problematic peer is {}:{}", peer_address_string , peer_port );
+        return false;
     }
 
     // manually send forge
     flush_sendbuf(peer_socket, connection_map[peer_socket], epollfd);
 
-    std::set<Node> returned_nodes{};
+    std::unordered_set<Node> returned_nodes{};
     auto handle_answer = [&](socket_t sockfd, u_short message_size) {
         return handle_DHT_RPC_find_node_reply(sockfd, message_size, &returned_nodes);
     };
 
-    bool success = process_answers(epollfd, P2PType::DHT_RPC_FIND_NODE_REPLY, handle_answer, 1);
+    bool success = process_answers_on_epollin(epollfd, P2PType::DHT_RPC_FIND_NODE_REPLY, handle_answer, 1);
 
     if (!success) {
         logError("connect_to_network: Expected valid find node reply response from peer {}:{}, but didn't get a valid one.", peer_address_string, peer_port);
@@ -2238,22 +2272,23 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
     }
 
     auto count = routing_table.count();
-    logInfo("connect_to_network: Got response with {} peer{} other than our own.", count,count != 1 ? "s" : "");
+    logInfo("connect_to_network: Got response with {} peer{}. Testing connections, then expanding network.", count,count != 1 ? "s" : "");
 
-    size_t last_bucket_number;
+    size_t last_node_number;
     do {
-        last_bucket_number = routing_table.get_bucket_list().size();
+        perform_maintenance();
+        last_node_number = routing_table.count();
         for (auto& bucket : routing_table.get_bucket_list()) {
             auto random_key = generate_random_nodeID(bucket.get_start(), bucket.get_end());
             auto nodes = blocking_node_lookup(random_key);
             for(auto& node : nodes) {
-                routing_table.add_peer(node);
+                routing_table.try_add_peer(node);
             }
         }
-    } while (routing_table.get_bucket_list().size() != last_bucket_number);
+    } while (routing_table.count() != last_node_number);
 
     count = routing_table.count();
-    logInfo("Joined network and found {} existing node",count,count != 1 ? "s" : "");
+    logInfo("Joined network and found {} existing node{}",count,count != 1 ? "s" : "");
 
     return true;
 }
@@ -2290,15 +2325,12 @@ int main(int argc, char const *argv[])
          * 3. to join existing network: pass peer ip and port for p2p contact point
         */
         //Setup logger:
-        auto loglevel = spdlog::level::info;
+        auto loglevel = spdlog::level::debug;
         auto loggerOpt = setup_Logger(loglevel);
         if(!loggerOpt.has_value())
         {
             return 1;
         }
-
-
-
 
         std::string host_address_string = {};
 
@@ -2434,10 +2466,10 @@ int main(int argc, char const *argv[])
     logTrace("Setup listening module api socket");
     main_epollfd = epoll_create1(0);
     logTrace("Setup main epoll file descriptor");
-    main_epollfd = setup_epollin(main_epollfd, module_api_socket);
+    main_epollfd = add_epoll(main_epollfd, module_api_socket, EPOLLIN);
     socket_t p2p_socket = setup_server_socket(host_p2p_port);
     logTrace("Setup listening p2p socket");
-    main_epollfd = setup_epollin(main_epollfd, p2p_socket);
+    main_epollfd = add_epoll(main_epollfd, p2p_socket, EPOLLIN);
     std::vector<epoll_event> epoll_events{64};
 
 
@@ -2453,7 +2485,7 @@ int main(int argc, char const *argv[])
     //TODO: Persistent storage of certificate map necessary? I doubt it. Argument only passed for filename uniqueness.
     prepare_SSL_Config(/*host_p2p_port*/);
 
-    logInfo("Prepared the \"SSLConfig::\" (context, self-signed certificate,...) for all future P2P-data transmissions ");
+    logDebug("Prepared the \"SSLConfig::\" (context, self-signed certificate,...) for all future P2P-data transmissions ");
 
     if(should_connect_to_network) {
         if (!connect_to_network(peer_port, peer_address_string, peer_address)) {
@@ -2467,7 +2499,7 @@ int main(int argc, char const *argv[])
     constexpr std::chrono::seconds purging_period{MIN_LIFETIME_SEC/2};
     purger = std::thread(purge_local_storage,purging_period);
 
-    logInfo("Started local_storage purging thread. Thread will purge periodically, sleep {} seconds in between", static_cast<int>(purging_period.count()));
+    logDebug("Started local_storage purging thread. Thread will purge periodically, sleep {} seconds in between", static_cast<int>(purging_period.count()));
     logDebug("Entering main epoll event loop");
 
     // event loop

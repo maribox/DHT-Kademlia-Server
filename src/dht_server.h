@@ -9,6 +9,7 @@
 #include <vector>
 #include <sys/epoll.h>
 #include <filesystem>
+#include <unordered_set>
 
 //Project includes
 #include "routing.h"
@@ -115,10 +116,15 @@ enum ErrorType: u_short {
     DHT_SERVER_ERROR = 20,
 };
 
-bool operator==(const Node& lhs, const Node& rhs);
+
+
+
+
 bool operator<(const Key& lhs, const Key& rhs);
 bool operator<=(const Key& lhs, const Key& rhs);
 bool operator==(const Key& lhs, const Key& rhs);
+
+bool is_same_network_node_or_nodeid(const Node &lhs, const Node &rhs);
 
 std::string key_to_string(const Key& key);
 std::string ip_to_string(const in6_addr& ip);
@@ -157,7 +163,7 @@ bool handle_DHT_failure(socket_t socket, u_short body_size);
 bool forge_DHT_RPC_ping(socket_t socket, int epollfd);
 bool handle_DHT_RPC_ping(socket_t socket, int epollfd, u_short body_size);
 bool forge_DHT_RPC_ping_reply(socket_t socket, int epollfd, Key rpc_id);
-bool handle_DHT_RPC_ping_reply(socket_t socket, u_short body_size, std::set<socket_t>* successfully_pinged_sockets);
+bool handle_DHT_RPC_ping_reply(socket_t socket, u_short body_size, std::unordered_set<socket_t>* successfully_pinged_sockets);
 
 bool forge_DHT_RPC_store(socket_t socket, int epollfd, u_short time_to_live, Key& key, Value& value);
 bool handle_DHT_RPC_store(socket_t socket, u_short body_size);
@@ -167,7 +173,7 @@ bool handle_DHT_RPC_store_reply(socket_t socket, u_short body_size);
 bool forge_DHT_RPC_find_node(socket_t socket, int epollfd, NodeID target_node_id);
 bool handle_DHT_RPC_find_node(socket_t socket, u_short body_size);
 bool forge_DHT_RPC_find_node_reply(socket_t socket, int epollfd, Key rpc_id, std::vector<Node> closest_nodes);
-bool handle_DHT_RPC_find_node_reply(socket_t socket, u_short body_size, std::set<Node>* closest_nodes_ptr = nullptr, std::mutex* returned_nodes_mutex_ptr = nullptr);
+bool handle_DHT_RPC_find_node_reply(socket_t socket, u_short body_size, std::unordered_set<Node>* closest_nodes_ptr = nullptr, std::mutex* returned_nodes_mutex_ptr = nullptr);
 
 bool forge_DHT_RPC_find_value(socket_t socket, int epollfd, Key& key);
 bool handle_DHT_RPC_find_value(socket_t socket, u_short body_size);
@@ -186,16 +192,18 @@ ProcessingStatus try_processing(socket_t curfd);
 void accept_new_connection(int epollfd, const epoll_event &cur_event, ConnectionType connection_type);
 void run_event_loop(socket_t module_api_socket, socket_t p2p_socket, int epollfd, std::vector<epoll_event>& epoll_events);
 
+int add_epoll(int epollfd, socket_t serversocket, uint32_t events);
+int mod_epoll(int epollfd, socket_t serversocket, uint32_t events);
+
 socket_t setup_server_socket(u_short port);
-socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t port, const ConnectionType connection_type);
-int setup_epollin(int epollfd, socket_t serversocket);
+socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t port, ConnectionType connection_type);
 
 bool read_EPOLLIN(int epollfd, const epoll_event& current_event);
 bool handle_EPOLLIN(int epollfd, const epoll_event &current_event);
 bool handle_EPOLLOUT(int epollfd, const epoll_event &current_event);
 
 socket_t set_socket_blocking(socket_t peer_socket, bool blocking);
-bool ensure_tls_blocking(socket_t peer_socket, std::chrono::seconds timeout_sec = 2s);
+bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms = 300);
 
 int parse_commandline_args(int argc, const char* argv[]);
 

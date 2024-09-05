@@ -50,7 +50,7 @@ class RoutingTable {
     Node local_node;
 
    public:
-    void add_peer(const Node& peer);
+    void try_add_peer(const Node& peer);
     void split_bucket();
 
     size_t count();
