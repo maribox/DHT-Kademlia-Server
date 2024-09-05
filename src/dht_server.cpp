@@ -18,7 +18,6 @@
 #include <string_view>
 #include <chrono>
 
-
 //#include "routing.cpp"
 namespace progOpt = boost::program_options;
 
@@ -53,12 +52,7 @@ static constexpr size_t MAX_REPLICATION = 30;
 static constexpr size_t MIN_REPLICATION = 3;
 static constexpr size_t DEFAULT_REPLICATION = 20; // should be same to K
 
-#define logTrace spdlog::trace
-#define logDebug spdlog::debug
-#define logInfo spdlog::info
-#define logWarn spdlog::warn
-#define logError spdlog::error
-#define logCritical spdlog::critical
+
 
 
 
@@ -145,9 +139,9 @@ bool convert_to_ipv6(const std::string& address_string, struct in6_addr& address
         try {
             char address_converted[INET6_ADDRSTRLEN];
             inet_ntop(AF_INET6, &address, address_converted, INET6_ADDRSTRLEN);
-            //std::cout << "Converted address "  << address_string  << " to " << address_converted << std::endl;
+            logTrace("Converted address {} to {}", address_string, address_converted);
         } catch (...) {
-            std::cerr << "Converted address " << address_string  << " but couldn't format." << std::endl;
+            logError("Converted address {} but couldn't format.", address_string);
         }
         return true;
     }
@@ -250,15 +244,11 @@ void tear_down_connection(int epollfd, socket_t socketfd){
 
         epoll_ctl(epollfd,EPOLL_CTL_DEL,socketfd,nullptr);
 
-        #ifdef TCP_VERBOSE
-            std::cout << "Tore down connection running over port: " << connection_info.client_port << "." << std::endl;
-        #endif
+        logDebug("Tore down connection running over port: {}.", connection_info.client_port);
 
     }else{
         //Should be a dead branch:
-        #ifdef TCP_VERBOSE
-        std::cout << "Supposedly dead control flow branch reached in tear_down_connection(...)" << std::endl;
-        #endif
+        logError("Supposedly dead control flow branch reached in tear_down_connection(...)");
         close(socketfd);
     }
 }
@@ -279,13 +269,13 @@ std::pair<bool,bool> flush_write_connInfo_with_SSL(ConnectionInfo &connection_in
             int err = SSL_get_error(ssl, bytes_flushed);
             if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
                 // Retry SSL_write() later.
-                std::cerr << "SSL write error, try again later" << std::endl;
+                logDebug("SSL write error, try again later");
                 is_socket_still_up = true;
                 was_everything_sent = false;
                 return ret;
             } else {
                 tear_down_connection(epollfd,socketfd);
-                std::cerr << "Other SSL write error. Tore down connection." << std::endl;
+                logError("Other SSL write error. Tore down connection.");
                 is_socket_still_up = false;
                 was_everything_sent = false;
                 return ret;
@@ -315,13 +305,13 @@ std::pair<bool,bool> flush_write_connInfo_without_SSL(ConnectionInfo &connection
         if(bytes_flushed == -1){
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 // Retry write() later.
-                std::cerr << "Socket write error, try again later" << std::endl;
+                logDebug("Socket write error, try again later");
                 is_socket_still_up = true;
                 was_everything_sent = false;
                 return ret;
             } else {
                 tear_down_connection(epollfd,socketfd);
-                std::cerr << "Other socket write error. Tore down connection." << std::endl;
+                logError("Other socket write error. Tore down connection.");
                 is_socket_still_up = false;
                 was_everything_sent = false;
                 return ret;
@@ -547,9 +537,7 @@ Key read_rpc_header(const Message& message, in6_addr peer_ip) {
 
     auto peer = Node{peer_ip, sender_port, sender_node_id};
     if (!routing_table.contains(peer)) {
-        #ifdef KADEMLIA_VERBOSE
-        std::cout << "Got contacted by new peer reachable at " << ip_to_string(peer.addr) << ":" << sender_port << std::endl;
-        #endif
+        logInfo("Got contacted by new peer reachable at {}:{}", ip_to_string(peer.addr), sender_port);
         routing_table.add_peer(peer);
     }
 
@@ -585,7 +573,7 @@ bool check_rpc_id(const Message &message, const Key &correct_rpc_id) {
     Key rpc_id;
     read_body(message, NODE_ID_SIZE + 2, rpc_id.data(), 32);
     if (rpc_id != correct_rpc_id) {
-        std::cerr << "Got message with invalid rpc-id!" << std::endl;
+        logWarn("Got message with invalid rpc-id!");
         return false;
     }
     return true;
@@ -643,8 +631,7 @@ std::vector<Node> blocking_node_lookup(Key &key, size_t number_of_nodes) {
     std::set<Node> previous_k_closest_nodes{};
 
 
-    //std::cout << "Trying to find neighbours of a key starting with '"
-    //        << std::hex << key[0] << key[1] << "'... " << std::dec << std::endl;
+    //logInfo("Trying to find neighbours of a key starting with '{:x}{:x}'...", key[0], key[1]);
 
     while (true) {
         // TODO
@@ -711,7 +698,7 @@ std::vector<Node> blocking_node_lookup(Key &key, size_t number_of_nodes) {
         );
     }
 
-    //std::cout << "Lookup completed. Found " << closest_nodes.size() << " closest nodes." << std::endl;
+    //logInfo("Lookup completed. Found {} closest nodes.", closest_nodes.size());
     return closest_nodes;
 }
 
@@ -724,9 +711,7 @@ void crawl_blocking_and_store(Key &key, Value &value, const int time_to_live, in
         }
 
         if (node == routing_table.get_local_node()) {
-            #ifdef KADEMLIA_VERBOSE
-            std::cout << "Stored key '" << key_to_string(key) << "' with value '" << value.data() << "' to own storage" << std::endl;
-            #endif
+            logInfo("Stored key '{}' with value '{}' to own storage", key_to_string(key), value.data());
             save_to_storage(key, std::chrono::seconds(time_to_live), value);
             continue;
         }
@@ -753,18 +738,14 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
         }
 
         if (node == routing_table.get_local_node()) {
-            #ifdef KADEMLIA_VERBOSE
-            std::cout << "Trying to get key '" << key_to_string(key) << "' from own storage" << std::endl;
-            #endif
+            logInfo("Trying to get key '{}' from own storage", key_to_string(key));
             if (const Value* value = get_from_storage(key)) {
                 found_values.push_back(*value);
             }
             continue;
         }
 
-        #ifdef KADEMLIA_VERBOSE
-        std::cout << "sending request to other node" << std::endl;
-        #endif
+        logInfo("Sending request to other node");
 
         socket_t sockfd = setup_connect_socket(epollfd, node.addr, node.port, {ConnectionType::P2P});
         socket_t peer_socket = setup_connect_socket(epollfd, node.addr, node.port, ConnectionType::P2P);
@@ -843,7 +824,7 @@ bool handle_DHT_put(socket_t socket, u_short body_size) {
     Value value{};
     value.resize(value_size);
     read_body(message, 4 + KEY_SIZE, value.data(), value_size);
-
+    logInfo("Got request to set key '{}' to value '{}'", key_to_string(key), value.data());
     std::thread([key, value, time_to_live, replication]() mutable {
         crawl_blocking_and_store(key, value, time_to_live, replication);
     }).detach();
@@ -861,9 +842,7 @@ bool handle_DHT_get(socket_t socket, u_short body_size) {
     const Message& message = connection_map[socket].receive_bytes;
     Key key;
     read_body(message, 0, key.data(), KEY_SIZE);
-    #ifdef KADEMLIA_VERBOSE
-    std::cout << "Got request to get key " << key_to_string(key) << std::endl;
-    #endif
+    logInfo("Got request to get key '{}'", key_to_string(key));
     std::thread([key, socket]() mutable {
         crawl_blocking_and_return(key, socket);
     }).detach();
@@ -1047,9 +1026,7 @@ bool handle_DHT_RPC_store_reply(const socket_t socket, const u_short body_size) 
     }
 
     if (!std::ranges::equal(sent_value, saved_value)) {
-        #ifdef KADEMLIA_VERBOSE
-        std::cout << "Got back different value than sent value for sent key " << key_to_string(sent_key) << std::endl;
-        #endif
+        logWarn("The value received for key {} differs from the value sent.", key_to_string(sent_key));
     }
     return true;
 }
@@ -1075,12 +1052,10 @@ bool forge_DHT_RPC_find_node(socket_t socket, int epollfd, NodeID target_node_id
 bool perform_maintenance() {
     int epollfd = epoll_create1(0);
     if (epollfd == -1) {
-        std::cerr << "Error creating epollfd. Aborting maintenance." << std::endl;
+        logError("Error creating epollfd. Aborting maintenance.");
         return false;
     }
-    #ifdef KADEMLIA_VERBOSE
-    std::cout << "Performing maintenance..." << std::endl;
-    #endif
+    logInfo("Performing maintenance...");
 
     size_t expected_answers = 0;
     auto pinged_sockets_map = std::map<socket_t, Node>{};
@@ -1137,9 +1112,7 @@ bool handle_DHT_RPC_find_node(const socket_t socket, const u_short body_size) {
 
     // find the closest nodes, then return them:
     auto closest_nodes = routing_table.find_closest_nodes(target_node_id);
-    #ifdef KADEMLIA_VERBOSE
-    std::cout << "Found " << closest_nodes.size() << " nodes and returning them" << std::endl;
-    #endif
+    logInfo("Found {} nodes and returning them", closest_nodes.size());
     return forge_DHT_RPC_find_node_reply(socket, main_epollfd, rpc_id, closest_nodes);
 }
 
@@ -1198,7 +1171,7 @@ bool handle_DHT_RPC_find_node_reply(const socket_t socket, const u_short body_si
         }
     }
 
-    // std::cout << "Got back " << closest_nodes_ptr->size() << " node" << (closest_nodes_ptr->size() != 1 ? "s." : ".") << std::endl;
+    // logInfo("Got back {} node{}", closest_nodes_ptr->size(), (closest_nodes_ptr->size() != 1 ? "s." : "."));
 
     if (created_closest_nodes) {
         delete(closest_nodes_ptr);
@@ -1229,9 +1202,7 @@ bool handle_DHT_RPC_find_value(const socket_t socket, const u_short body_size) {
     if (body_size != RPC_SUB_HEADER_SIZE + KEY_SIZE) {
         return false;
     }
-    #ifdef KADEMLIA_VERBOSE
-    std::cout << "Was asked to get value..." << std::endl;
-    #endif
+    logInfo("Was asked to get value via find value request");
     const Message &message = connection_map[socket].receive_bytes;
 
     Key rpc_id = read_rpc_header(message, connection_map[socket].client_addr);
@@ -1283,7 +1254,7 @@ bool handle_DHT_RPC_find_value_reply(const socket_t socket, const u_short body_s
         found_values->push_back(value);
         return true;
     } else {
-        std::cerr << "Received find value reply without forge or without given found_values list" << std::endl;
+        logWarn("Received find value reply without forge or without given found_values list");
         return false;
     }
 }
@@ -1314,16 +1285,16 @@ bool handle_DHT_error(const socket_t socket, const u_short body_size) {
                              ":" + std::to_string(connection_map[socket].client_port);
     switch (error_type) {
         case ErrorType::DHT_NOT_FOUND:
-            std::cerr << "Received DHT_NOT_FOUND error by " << addr_string <<std::endl;
+            spdlog::error("Received DHT_NOT_FOUND error by {}", addr_string);
         break;
         case ErrorType::DHT_BAD_REQUEST:
-            std::cerr << "Sent out bad request to " << addr_string << std::endl;
+            spdlog::error("Sent out bad request to {}", addr_string);
         break;
         case ErrorType::DHT_SERVER_ERROR:
-            std::cerr << "Had internal server error with " << addr_string << std::endl;
+            spdlog::error("Had internal server error with {}", addr_string);
         break;
         default:
-            std::cerr << "Got invalid server error by " << addr_string << std::endl;
+            spdlog::error("Got invalid server error by {}", addr_string);
     }
     return true;
 }
@@ -1457,7 +1428,7 @@ ProcessingStatus try_processing(socket_t curfd){
         if (is_valid_module_API_type(dht_type)) {
             module_api_type = static_cast<ModuleApiType>(dht_type);
         } else {
-            std::cerr << "Tried to send invalid request to Module API Server. Aborting." << std::endl;
+            logWarn("Tried to send invalid request to Module API Server. Aborting.");
             return ProcessingStatus::ERROR;
         }
 
@@ -1467,7 +1438,7 @@ ProcessingStatus try_processing(socket_t curfd){
         if (is_valid_P2P_type(dht_type)) {
             p2p_type = static_cast<P2PType>(dht_type);
         } else {
-            std::cerr << "Tried to send invalid request to P2P Server. Aborting." << std::endl;
+            logWarn("Tried to send invalid request to P2P Server. Aborting.");
             return ProcessingStatus::ERROR;
         }
         valid_request = parse_P2P_request(curfd, message_size-HEADER_SIZE, p2p_type);
@@ -1475,7 +1446,7 @@ ProcessingStatus try_processing(socket_t curfd){
             forge_DHT_error(curfd, main_epollfd, DHT_BAD_REQUEST);
         }
     } else {
-        std::cerr << "No ConnectionType registered for client. Aborting." << std::endl;
+        logError("No ConnectionType registered for client. Aborting.");
         return ProcessingStatus::ERROR;
     }
     if (byte_count_to_process > message_size) {
@@ -1485,7 +1456,7 @@ ProcessingStatus try_processing(socket_t curfd){
     if (valid_request) {
         return ProcessingStatus::PROCESSED;
     } else {
-        std::cerr << "Unknown Error with request." << std::endl;
+        logError("Unknown Error with request.");
         return ProcessingStatus::ERROR;
     }
 }
@@ -1496,7 +1467,7 @@ void accept_new_connection(int epollfd, const epoll_event &cur_event, Connection
     socklen_t client_addr_len = sizeof(client_addr);
     socket_t socketfd = accept4(cur_event.data.fd, reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len, SOCK_NONBLOCK);
     if (socketfd == -1) {
-        std::cerr << "Socket accept error: " << strerror(errno) << std::endl;
+        logError("Socket accept error: {}", strerror(errno));
         return;
     }
 
@@ -1508,23 +1479,17 @@ void accept_new_connection(int epollfd, const epoll_event &cur_event, Connection
     connection_info.client_addr = client_addr.sin6_addr;
     connection_info.client_port = client_port;
 
-
-    #ifdef TCP_VERBOSE
-    std::cout << "Accepted socket connection from " << ip_to_string(client_addr.sin6_addr) << ":" << client_port << std::endl;
-    #endif
-
+    logDebug("Accepted socket connection from {}:{}", ip_to_string(client_addr.sin6_addr), client_port);
 
     if(connection_type == ConnectionType::P2P){
 
-        #ifdef SSL_VERBOSE
-        std::cout << "Setting up SSL for incoming client connection (we are server)" << std::endl;
-        #endif
+        logDebug("Setting up SSL for incoming client connection (we are server)");
 
         SSL* ssl = SSL_new(SSLConfig::server_ctx);
         connection_info.ssl = ssl;
 
         if(!ssl){
-            std::cerr << "Failure Server: SSL object null pointer" << std::endl;
+            logError("Failure Server: SSL object null pointer");
             return;
         }
         SSL_set_fd(ssl, socketfd);
@@ -1533,9 +1498,7 @@ void accept_new_connection(int epollfd, const epoll_event &cur_event, Connection
         SSLUtils::check_ssl_blocking_mode(ssl);
         #endif
 
-        #ifdef SSL_VERBOSE
-        std::cout << "Supplying length-prefixed Server-Certificate over insecure TCP channel" << std::endl;
-        #endif
+        logDebug("Supplying length-prefixed Server-Certificate over insecure TCP channel");
 
         connection_info.ssl_stat = SSLStatus::HANDSHAKE_SERVER_WRITE_CERT;
 
@@ -1551,7 +1514,7 @@ void accept_new_connection(int epollfd, const epoll_event &cur_event, Connection
         if(everything_was_sent){
             connection_info.ssl_stat = SSLUtils::try_ssl_accept(ssl);
             if(connection_info.ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
-                std::cerr << "Fatal error occured on SSL accept. TCP connection was closed." << std::endl;
+                logError("Fatal error occured on SSL accept. TCP connection was closed.");
                 SSL_free(ssl);
                 close(socketfd);
                 return;
@@ -1578,7 +1541,7 @@ CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socke
     unsigned char * foreign_cert_str = nullptr;
     uint32_t cert_len{0};
     bool socket_still_alive = receive_prefixed_sendbuf_in_charptr(epollfd, peer_socket, connection_info_emplaced, foreign_cert_str, cert_len);
-    
+
     if(!foreign_cert_str && socket_still_alive){
         return CertificateStatus::CERTIFICATE_NOT_FULLY_PRESENT;
     }
@@ -1587,7 +1550,7 @@ CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socke
         free(foreign_cert_str);
         return CertificateStatus::ERRORED_CERTIFICATE;
     }
-    
+
 
     X509 * foreign_certificate = SSLUtils::load_cert_from_char(foreign_cert_str,cert_len);
     free(foreign_cert_str);
@@ -1596,25 +1559,21 @@ CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socke
     //Save foreign cert str
     unsigned char received_id[KEY_SIZE];
     if(!SSLUtils::extract_custom_id(foreign_certificate,received_id)){
-        std::cerr << "Failed to extract IPv6 from certificate." << std::endl;
+        logError("Failed to extract IPv6 from certificate.");
         return CertificateStatus::ERRORED_CERTIFICATE;
     }
 
 
     std::string hex_id = Utils::bin_to_hex(received_id, KEY_SIZE);
-    #ifdef SSL_VERBOSE
-    std::cout << "Hex ID received in certificate is: " << hex_id << std::endl;
-    #endif
+    logDebug("Hex ID received in certificate is: {}", hex_id);
 
     std::string ipv6_str{};
     if(!SSLUtils::extract_ipv6_from_cert(foreign_certificate,ipv6_str)){
-        std::cerr << "Failed to extract IPv6 from certificate." << std::endl;
+        logError("Failed to extract IPv6 from certificate.");
         return CertificateStatus::ERRORED_CERTIFICATE;
     }
     if (SSLConfig::cert_map.find(hex_id) != SSLConfig::cert_map.end()) {
-        #ifdef SSL_VERBOSE
-        std::cout << "Kademlia ID already recognized." << std::endl;
-        #endif
+        logDebug("Kademlia ID already recognized.");
         //Compare certificates
         if(SSLUtils::compare_x509_cert_with_pem(foreign_certificate, SSLConfig::cert_map.find(hex_id)->second.second)){
             //Compare yielded equality:
@@ -1625,7 +1584,7 @@ CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socke
             return CertificateStatus::KNOWN_CERTIFICATE_CONTENT_MISMATCH;
         }
     }
-    
+
     // Else, meaning the certificate is new or the predecessor of the kademlia was unreachable with our saved certificate:
     // Add the new certificate to the map
     BIO *bio = BIO_new(BIO_s_mem());
@@ -1640,7 +1599,7 @@ CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socke
     free(cert_pem);
 
     if (X509_STORE_add_cert(SSLConfig::client_cert_store, foreign_certificate) != 1) {
-        std::cerr << "Failed to add certificate to trusted store." << std::endl;
+        logError("Failed to add certificate to trusted store.");
         SSLConfig::cert_map.erase(hex_id);
         return CertificateStatus::ERRORED_CERTIFICATE;
     }
@@ -1651,40 +1610,40 @@ CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socke
 //Return value bool: socket_still_up
 bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &connection_info){
     if(connection_info.role == ConnectionRole::SERVER){
-        logCritical("handle_custom_ssl_protocol: SERVER entered.---------------------------");
+        logTrace("handle_custom_ssl_protocol: SERVER entered.---------------------------");
         auto [is_socket_still_up, everything_was_sent] = std::make_tuple(true, false);
         switch (connection_info.ssl_stat)
         {
             //Server still needs to finish SSL handshake for the next few cases:
 
             case SSLStatus::HANDSHAKE_SERVER_WRITE_CERT:
-                //length prefixed ssl certificate is buffered since accept_new_connection. Simply flush it    
+                //length prefixed ssl certificate is buffered since accept_new_connection. Simply flush it
                 std::tie(is_socket_still_up, everything_was_sent) = flush_sendbuf(socketfd,connection_info,epollfd);
                 if(!is_socket_still_up){
                     //Connection got torn down due to error(s) on certificate transmission. Abort accepting.
-                    logCritical("handle_custom_ssl_protocol: left. ---------------------------");
+                    logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                     return false;
                 }
                 if(everything_was_sent){
                     connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
                     if(connection_info.ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
                         tear_down_connection(epollfd,socketfd);
-                        logCritical("handle_custom_ssl_protocol: left. ---------------------------");
+                        logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                         return false;
                     }
                     //We retried ssl_accept, but this time we guaranteed progressed ssl_stat to at least AWAITING_ACCEPT
-                    logCritical("handle_custom_ssl_protocol: left. ---------------------------");
+                    logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                     return true;
                 }
-                logCritical("handle_custom_ssl_protocol: left. ---------------------------");
+                logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                 return true;
             case SSLStatus::PENDING_ACCEPT:
                 connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
-                logCritical("handle_custom_ssl_protocol: left. ---------------------------");
+                logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                 return true;
             case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
                 tear_down_connection(epollfd,socketfd);
-                logCritical("handle_custom_ssl_protocol: left. ---------------------------");
+                logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                 return false;
 
             //Server as already finished handshake (SSLStatus::ACCEPTED)->
@@ -1695,7 +1654,7 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
         //Skip after the next large else case to proceed with normal socket input handeling. :)
     }
     else{
-        logCritical("handle_custom_ssl_protocol: CLIENT entered.---------------------------");
+        logTrace("handle_custom_ssl_protocol: CLIENT entered.---------------------------");
         bool is_socket_still_up{};
         CertificateStatus cs{};
         switch (connection_info.ssl_stat)
@@ -1703,35 +1662,35 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
             //Client still needs to finish SSL handshake for the next few cases
 
             case SSLStatus::HANDSHAKE_CLIENT_READ_CERT:
-                //length prefixed ssl certificate is buffered on serverside since accept_new_connection. Simply read flush it    
+                //length prefixed ssl certificate is buffered on serverside since accept_new_connection. Simply read flush it
                 is_socket_still_up = flush_recvbuf(socketfd,connection_info,epollfd);
                 if(!is_socket_still_up){
                     //Connection got torn down due to error(s) on certificate reception. Abort connecting.
-                    logCritical("handle_custom_ssl_protocol: left. ---------------------------");
+                    logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                     return false;
                 }
                 cs = receive_certificate_as_client(epollfd,socketfd,connection_info);
                 //Perform heavy lifting (certificate validation, persistent storage)
                 if(cs == CertificateStatus::NEW_VALID_CERTIFICATE || cs == CertificateStatus::EXPECTED_CERTIFICATE){
                     connection_info.ssl_stat = SSLUtils::try_ssl_connect(connection_info.ssl);
-                    logCritical("handle_custom_ssl_protocol: left. ---------------------------");
+                    logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                     return true;
                 }
                 if(cs == CertificateStatus::ERRORED_CERTIFICATE || cs == CertificateStatus::KNOWN_CERTIFICATE_CONTENT_MISMATCH){
                     tear_down_connection(epollfd,socketfd);
-                    logCritical("handle_custom_ssl_protocol: left. ---------------------------");
+                    logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                     return false;
                 }
                 //Certificate is not fully present yet. Return true, try again later.
-            logCritical("handle_custom_ssl_protocol: left. ---------------------------");
+            logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                 return true;
             case SSLStatus::PENDING_CONNECT:
                 connection_info.ssl_stat = SSLUtils::try_ssl_connect(connection_info.ssl);
-                logCritical("handle_custom_ssl_protocol: left. ---------------------------");
+                logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                 return true;
             case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
                 tear_down_connection(epollfd,socketfd);
-                logCritical("handle_custom_ssl_protocol: left. ---------------------------");
+                logTrace("handle_custom_ssl_protocol: left. ---------------------------");
                 return false;
             //Client as already finished handshake (SSLStatus::CONNECTED)->
             default:
@@ -1748,7 +1707,7 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
         epoll_ctl(epollfd,EPOLL_CTL_MOD,socketfd, &eevent);
     }
     */
-    logCritical("handle_custom_ssl_protocol: left. ---------------------------");
+    logTrace("handle_custom_ssl_protocol: left. ---------------------------");
     return true; //valid ssl connection
 }
 
@@ -1776,7 +1735,7 @@ bool handle_EPOLLOUT(int epollfd, const epoll_event &current_event){
         logError("handle_EPOLLOUT: handle_custom_ssl_protocol return invalid socket, so tore down connection.");
         return false;
     }
-    logCritical("handle_EPOLLOUT: handle_custom_ssl_protocol has possibly advanced our SSL state to: {}",connection_info.ssl_stat);
+    logTrace("handle_EPOLLOUT: handle_custom_ssl_protocol has possibly advanced our SSL state to: {}",connection_info.ssl_stat);
 
     //flush send_buffer.
     auto [socket_still_up, _ ]  = flush_sendbuf(socketfd,connection_info,epollfd);
@@ -1800,7 +1759,7 @@ bool read_EPOLLIN(int epollfd, const epoll_event& current_event){
     if(!handle_custom_ssl_protocol(epollfd,socketfd,connection_info)){
         return false; //Socket was torn down by us.
     }
-    logCritical("read_EPOLLIN: handle_custom_ssl_protocol has possibly advanced our SSL state to: {}",connection_info.ssl_stat);
+    logTrace("read_EPOLLIN: handle_custom_ssl_protocol has possibly advanced our SSL state to: {}",connection_info.ssl_stat);
 
     return flush_recvbuf(socketfd, connection_info, epollfd);
 }
@@ -1849,7 +1808,7 @@ socket_t setup_server_socket(u_short port) {
 
     socket_t serversocket = socket(AF_INET6, SOCK_STREAM, 0);
     if (serversocket < 0) {
-        std::cerr << "Socket creation failed." << std::endl;
+        logError("Socket creation failed.");
         return -1;
     }
 
@@ -1863,18 +1822,18 @@ socket_t setup_server_socket(u_short port) {
     sock_addr.sin6_addr = in6addr_any;
 
     if (bind(serversocket, reinterpret_cast<sockaddr *>(&sock_addr), sizeof(sock_addr)) < 0) {
-        std::cerr << "Failed to bind port " << port << ". Error: " << strerror(errno) << std::endl;
+        logError("Failed to bind port {}. Error: {}", port, strerror(errno));
         close(serversocket);
         return -1;
     }
 
     if (listen(serversocket, 128) != 0) {
-        std::cerr << "Failed to listen on port " << port << ". Error: " << strerror(errno) << std::endl;
+        logError("Failed to listen on port {}. Error: {}", port, strerror(errno));
         close(serversocket);
         return -1;
     }
 
-    // std::cout << "Listening on port " << port << "." << std::endl;
+    logInfo("Listening on port {}", port);
     return serversocket;
 }
 
@@ -1902,7 +1861,7 @@ socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t po
     //TODO: Maybe unfortunate, does only init the 3-way handshake, peer could not have accepted yet.
     logTrace("setup_connect_socket: connect() call...", port);
     if (connect(peer_socket, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == -1) {
-        logError("setup_connect_socket: Failed to connect() to peer", port);
+        logError("setup_connect_socket: Failed to connect() to peer at {}:{}: {}", ip_to_string(address), port, strerror(errno));
         close(peer_socket);
         return -1;
     }
@@ -1921,7 +1880,7 @@ socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t po
         SSL* ssl = SSL_new(SSLConfig::client_ctx);
         connection_info_emplaced.ssl = ssl;
         connection_info_emplaced.ssl_stat = SSLStatus::HANDSHAKE_CLIENT_READ_CERT;
-        logCritical("setup_connect_socket: Client SSLStatus of connection has been initialized with HANDSHAKE_CLIENT_READ_CERT");
+        logTrace("setup_connect_socket: Client SSLStatus of connection has been initialized with HANDSHAKE_CLIENT_READ_CERT");
         if(!ssl){
             tear_down_connection(epollfd,peer_socket);
             logError("setup_connect_socket: Failure, SSL object is null pointer. Tore down connection and aborted connect()");
@@ -1956,7 +1915,7 @@ socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t po
             logError("setup_connect_socket: try_ssl_connect() failed fatally, tore down the connection");
             return -1;
         }
-        logCritical("setup_connect_socket: SSL State transitioned to at least SSLStatus::AWAITING_CONNECT, SSLStatus value is {}",connection_info_emplaced.ssl_stat);
+        logTrace("setup_connect_socket: SSL State transitioned to at least SSLStatus::AWAITING_CONNECT, SSLStatus value is {}",connection_info_emplaced.ssl_stat);
     }
     return peer_socket;
 }
@@ -2090,17 +2049,15 @@ socket_t setup_connect_socket_blocking(int epollfd, struct in6_addr peer_address
 void force_close_socket(int sockfd) {
     struct linger linger_option = {1, 0};  // Enable SO_LINGER with a timeout of 0
     if (setsockopt(sockfd, SOL_SOCKET, SO_LINGER, &linger_option, sizeof(linger_option)) < 0) {
-        perror("setsockopt(SO_LINGER) failed");
+        logError("setsockopt(SO_LINGER) failed");
         return;
     }
 
     if (close(sockfd) < 0) {
-        perror("close failed");
+        logError("close failed");
         return;
     } else {
-        #ifdef TCP_VERBOSE
-        std::cout << "Socket forcefully closed." << std::endl;
-        #endif
+        logDebug("Socket forcefully closed.");
         return;
     }
 }
@@ -2151,7 +2108,7 @@ bool ensure_tls_blocking(socket_t peer_socket, std::chrono::seconds timeout_sec)
                 continue;
             }
             //TODO: Ask Marius about this if branching
-            std::cerr << "Couldn't build TLS tunnel: " << errno << std::endl;
+            logError("Couldn't build TLS tunnel: {}", strerror(errno));
             return false;
         }
         for (int i = 0; i < event_count; ++i) {
@@ -2165,7 +2122,6 @@ bool ensure_tls_blocking(socket_t peer_socket, std::chrono::seconds timeout_sec)
             }
             // handle client processing of existing sessions
             if (connection_map[current_event.data.fd].ssl_stat == SSLStatus::CONNECTED) {
-                std::cout << "setup_tls_blocking: TLS Connection established." << std::endl;
                 logDebug("setup_tls_blocking: Setup TLS Connection established.");
                 logTrace("setup_tls_blocking: returning successfully.");
                 return true;
@@ -2208,7 +2164,7 @@ bool wait_on_find_node_reply(socket_t peer_socket) {
             }
             if  (still_valid && epoll_events[i].events & EPOLLIN) {
                 if (!read_EPOLLIN(epollfd, epoll_events[i])) {
-                    std::cerr << "Didn't receive response during bootstrap" << std::endl;
+                    logError("Didn't receive response during bootstrap.");
                     return false;
                 }
 
@@ -2221,7 +2177,7 @@ bool wait_on_find_node_reply(socket_t peer_socket) {
                     if (handle_DHT_RPC_find_node_reply(sockfd, message_size - HEADER_SIZE)) {
                         return true;
                     } else {
-                        std::cerr << "Received invalid find node reply during bootstrap" << std::endl;
+                        logError("Received invalid find node reply during bootstrap");
                         tear_down_connection(epollfd, peer_socket);
                         return false;
                     }
@@ -2254,14 +2210,13 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
     bool ssl_success = ensure_tls_blocking(peer_socket, 300s);
     logDebug("connect_to_network: The TLS setup of the socket to peer was {}", ssl_success? "successful" : "unsucessful");
     if (peer_socket == -1 || epollfd == -1 || !ssl_success) {
-        logError("connect_to_network: failed initial setup (handshakes, epoll)");
-        std::cerr << "Error creating socket. Aborting." << std::endl;
+        logError("connect_to_network: failed initial setup (ssl handshake or epoll)");
         return false;
     }
 
     logInfo("connect_to_network: Passed initial setup, proceeding with neighbour discovery (Find Node request of target self to peer)");
 
-    std::cout << "Sending Find Node Request..." << std::endl;
+    logInfo("Sending Find Node Request...");
     if (!forge_DHT_RPC_find_node(peer_socket, epollfd, routing_table.get_local_node().id)) {
         //TODO: @Marius, do we need to abort here or proceed differently?
         logError("connect_to_network: Couldn't send Find Node Request during bootstrapping, problematic peer is {}:{}", peer_address_string , peer_port );
@@ -2310,11 +2265,11 @@ std::optional<std::shared_ptr<spdlog::logger>> setup_Logger(spdlog::level::level
     {
         std::filesystem::create_directories("logs");
 
-        auto stdout_logger = spdlog::stdout_color_mt("stdout_logger");
+        auto stdout_logger = spdlog::stdout_color_mt("dht_server");
         spdlog::set_default_logger(stdout_logger);
         spdlog::set_level(loglevel);
 
-        spdlog::info("Logger initialized successfully.");
+        spdlog::debug("Logger initialized successfully.");
         //"Trace" is the most verbose (Includes all logging statements, floods logging)
         //"Critical" is the least verbose (basically always logged, rare output)
         return stdout_logger;
@@ -2346,6 +2301,7 @@ int main(int argc, char const *argv[])
 
 
         std::string host_address_string = {};
+
         struct in6_addr host_address{};
         u_short host_module_port = ServerConfig::MODULE_API_PORT;
         u_short host_p2p_port = ServerConfig::P2P_PORT;
@@ -2360,16 +2316,23 @@ int main(int argc, char const *argv[])
         std::string help_description = "Run a DHT peer with local storage.\n\n"
                     "Multiple API clients can connect to this same instance.\n"
                     "To connect to an existing network, provide the ip address and port of a peer, otherwise a new network will be created.\n";
-        std::string examples = "Example usages:\n" // TODO: ::1 ergänzen
-                    "Start new p2p network on 192.168.0.42:7402\n"
-                    "\tdht_server -a 192.168.0.42 -m 7401 -p 7402\n"
-                    "Connect to p2p network on 192.168.0.42:7402 from 192.168.0.69:7404, accepting requests on port 7403\n"
-                    "\tdht_server -a 192.168.0.69 -m 7403 -p 7404 -A 192.168.0.42 -P 7402\n";
-        progOpt::options_description desc{help_description + examples};
+        std::string examples = "\nExample usages:\n\n"
+                        "Start new p2p network on '192.168.0.42:7402':\n"
+                        "\tdht_server -a 192.168.0.42 -m 7401 -p 7402\n"
+                        "Connect to p2p network on '192.168.0.42:7402' from '192.168.0.69:7404', accepting requests on port 7403:\n"
+                        "\tdht_server -a 192.168.0.69 -m 7403 -p 7404 -A 192.168.0.42 -P 7402\n"
+                        "\n"
+                        "To test the server on your local machine, you can create test nodes with:\n"
+                        "\tdht_server -a ::1 -m 7401 -p 7402\n"
+                        "\tdht_server -a ::1 -m 7403 -p 7404 -A ::1 -P 7402\n"
+                        "\tdht_server -a ::1 -m 7405 -p 7406 -A ::1 -P 7402\n"
+                        "\tdht_server -a  ::1 -m 7407 -p 7408 -A ::1 -P 7402\n";
+
+        progOpt::options_description desc{};
         try {
+            desc.add_options()("help,h", "Help screen")
             // Argument parsing:
             // Use boost::program_options for parsing:
-            desc.add_options()("help,h", "Help screen")
             ("host-address,a", progOpt::value<std::string>(&host_address_string), "Bind server to this address")
             ("module-port,m", progOpt::value<u_short>(&host_module_port), "Bind module api server to this port")
             ("p2p-port,p", progOpt::value<u_short>(&host_p2p_port), "Bind p2p server to this port")
@@ -2397,25 +2360,24 @@ int main(int argc, char const *argv[])
 
             if (vm.contains("help"))
             {
-                std::cout << desc << "\n";
+                std::string desc_string = (std::ostringstream() << desc).str();
+                logInfo("{}{}{}\n", help_description, desc_string, examples);
                 return 0;
             }
 
             if (vm.contains("unreg")) {
-                std::cout << examples << "\n";
-                logError("Unrecognized options");
+                std::string desc_string = (std::ostringstream() << desc).str();
+                logCritical("Unrecognized options");
+                logInfo("{}{}{}\n", help_description, desc_string, examples);
                 return 1;
             }
 
             if (host_module_port == host_p2p_port) {
-                logError("host_module_port and p2p_port are the same");
-                std::cerr << "Cannot setup Module API server and P2P server on the same port (" << host_module_port << "). Exiting." << std::endl;
+                logCritical("host_module_port and p2p_port are the same");
                 return -1;
             }
-            #ifdef GENERAL_VERBOSE
-            std::cout << "Modules reach this server on " << host_address_string << ":" << host_module_port << std::endl;
-            std::cout << "We communicate with peers on " << host_address_string << ":" << host_p2p_port << std::endl;
-            #endif
+            logInfo("Modules reach this server on {}:{}", host_address_string, host_module_port);
+            logInfo("We communicate with peers on {}:{}", host_address_string, host_p2p_port);
             if (system(("ping -c1 -s1 " + host_address_string + "  > /dev/null 2>&1").c_str()) != 0) {
                 logWarn("Warning: failed to ping host.");
             }
@@ -2423,17 +2385,14 @@ int main(int argc, char const *argv[])
             if (vm.contains("peer-address") && vm.contains("peer-port")) {
                 logInfo("Trying to connect to existing Network Node {}:{}",peer_address_string,peer_port);
                 if (!convert_to_ipv6(peer_address_string, peer_address)) {
-                    logError("Failed to convert ip address string to in_addr6 Type");
-                    std::cerr << "Please provide a syntactically correct IP address (v4 or v6) for the peer";
+                    logCritical("Failed to convert ip address string to in_addr6 Type. Please provide a syntactically correct IP address (v4 or v6) for the peer");
                     return 1;
                 }
                 if (system(("ping -c1 -s1 " + peer_address_string + "  > /dev/null 2>&1").c_str()) != 0) {
-                    std::cerr << "Warning: Failed to ping peer." << std::endl;
                     logWarn("Warning: Failed to ping peer");
                 }
             } else {
-                std::cout << "Since no peer to connect to was supplied, setting up new network..." << std::endl;
-                logInfo("Setting up a new network, no join-contact was supplied.");
+                logInfo("Setting up a new network as no join-contact was supplied.");
                 should_connect_to_network = false;
             }
 
@@ -2442,15 +2401,14 @@ int main(int argc, char const *argv[])
     catch (std::exception& _)
     {
         // passed invalid arguments, e.g. ip to port or similar
-        std::cerr << "Passed invalid arguments. Keep to correct formatting, format IPv4 addresses as 192.168.0.42 and ports separated by space.\n" << std::endl;
-        std::cout << desc << examples << "\n";
-        logError("Passed invalid commandline arguments.");
+        std::string desc_string = (std::ostringstream() << desc).str();
+        logCritical("Passed invalid commandline arguments.");
+        logInfo("{}{}{}\n", help_description, desc_string, examples);
         return -1;
     }
 
     if (!convert_to_ipv6(host_address_string, host_address)) {
-        std::cerr << "Please provide a syntactically correct IP address (v4 or v6) for the host\n";
-        logError("Please provide a syntactically correct host IP address");
+        logCritical("Please provide a syntactically correct host IP address");
         return 1;
     }
 
@@ -2485,8 +2443,7 @@ int main(int argc, char const *argv[])
 
 
     if (main_epollfd == -1 || module_api_socket == -1 || p2p_socket == -1) {
-        std::cerr << "Error creating sockets. Aborting" << std::endl;
-        logError("Error creating sockets");
+        logCritical("Error creating sockets");
         return 1;
     }
 
@@ -2511,12 +2468,10 @@ int main(int argc, char const *argv[])
     purger = std::thread(purge_local_storage,purging_period);
 
     logInfo("Started local_storage purging thread. Thread will purge periodically, sleep {} seconds in between", static_cast<int>(purging_period.count()));
-    logInfo("Entering main epoll event loop");
+    logDebug("Entering main epoll event loop");
 
     // event loop
-    #ifdef GENERAL_VERBOSE
-    std::cout << "Server running... " << std::endl;
-    #endif
+    logInfo("Server running...");
     bool server_is_running = true;
     while (server_is_running) {
         int event_count = epoll_wait(main_epollfd, epoll_events.data(), std::ssize(epoll_events), -1);  // dangerous cast
@@ -2528,7 +2483,7 @@ int main(int argc, char const *argv[])
             if (errno == EINTR) { // for debugging purposes
                 continue;
             }
-            logError("Error in epoll_wait, set errno is {}. Shutting down server...", errno);
+            logCritical("Error in epoll_wait: {}. Shutting down server...", strerror(errno));
             server_is_running = false;
             break;
         }
@@ -2543,7 +2498,7 @@ int main(int argc, char const *argv[])
             } else {
                 bool socket_still_valid = true;
                 if (!connection_map.contains(current_event.data.fd)) {
-                    std::cerr << "Tried to operate on a socket that's not connected anymore or not saved in our connections." << std::endl;
+                    logError("Tried to operate on a socket that's not connected anymore or not saved in our connections.");
                     continue;
                 }
                 // handle client processing of existing sessions
@@ -2566,7 +2521,7 @@ int main(int argc, char const *argv[])
         }
     }
 
-    std::cout << "Server terminating. " << server_is_running << std::endl;
+    logInfo("Server terminating. {}", server_is_running);
     sig_c_handler(SIGTERM);
     return 0;
 }

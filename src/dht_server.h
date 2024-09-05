@@ -15,9 +15,6 @@
 #include "common_types.h"
 #include "ssl.h"
 
-//For logging
-#include <spdlog/spdlog.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
 
 /* Naming scheme:
     classes/enums/structs/namespaces and types -> PascalCase

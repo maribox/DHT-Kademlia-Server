@@ -18,7 +18,7 @@
 bool NetworkUtils::is_non_blocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) {
-        std::cerr << "fcntl failed" << std::endl;
+        logError("fcntl failed");
         return false;
     }
     return (flags & O_NONBLOCK) != 0;
@@ -27,14 +27,14 @@ bool NetworkUtils::is_non_blocking(int fd) {
 void SSLUtils::check_ssl_blocking_mode(SSL *ssl) {
     int fd = SSL_get_fd(ssl);
     if (fd == -1) {
-        std::cerr << "SSL_get_fd failed" << std::endl;
+        logError("SSL_get_fd failed");
         return;
     }
 
     if (NetworkUtils::is_non_blocking(fd)) {
-        std::cout << "SSL operations are non-blocking." << std::endl;
+        logInfo("SSL operations are non-blocking.");
     } else {
-        std::cout << "SSL operations are blocking." << std::endl;
+        logInfo("SSL operations are non-blocking.");
     }
 }
 
@@ -56,7 +56,7 @@ bool NetworkUtils::getIPv6(char* buffer, size_t size){
     char ipstr[INET6_ADDRSTRLEN];
 
     if (getifaddrs(&interfaces) == -1) {
-        std::cerr << "getifaddrs failed, unable to find IPv6 addr." << std::endl;
+        logError("getifaddrs failed, unable to find IPv6 addr.");
         return false;
     }
 
@@ -87,7 +87,7 @@ void KeyUtils::save_private_key(EVP_PKEY* pkey, const std::string& filename) {
         PEM_write_PrivateKey(file, pkey, nullptr, nullptr, 0, nullptr, nullptr);
         fclose(file);
     } else {
-        std::cerr << "Failed opening file for writing private key" << std::endl;
+        logError("Failed opening file for writing private key");
     }
 }
 
@@ -97,7 +97,7 @@ void KeyUtils::save_public_key(EVP_PKEY* pkey, const std::string& filename) {
         PEM_write_PUBKEY(file, pkey);
         fclose(file);
     } else {
-        std::cerr << "Failed opening file for writing public key" << std::endl;
+        logError("Failed opening file for writing public key");
     }
 }
 
@@ -107,7 +107,7 @@ void CertUtils::save_certificate(X509* cert, const std::string& filename) {
         PEM_write_X509(file, cert);
         fclose(file);
     } else {
-        std::cerr << "Failed opening file for writing certificate" << std::endl;
+        logError("Failed opening file for writing certificate");
     }
 }
 
@@ -166,13 +166,13 @@ void NetworkUtils::send_data_with_length_prefix(int sock_fd, const char* data, s
 
     // Send the length prefix
     if (send(sock_fd, &net_length, sizeof(net_length), 0) == -1) {
-        perror("send: length prefix");
+        logError("send: length prefix");
         return;
     }
 
     // Send the actual data
     if (send(sock_fd, data, length, 0) == -1) {
-        perror("send: data");
+        logError("send: data");
     }
 }
 
@@ -199,17 +199,15 @@ char* NetworkUtils::receive_data_with_length_prefix(int sock_fd, size_t& length)
     // Receive the length prefix
     uint32_t net_length;
     if (recv(sock_fd, &net_length, sizeof(net_length), 0) <= 0) {
-        perror("recv: length prefix");
+        logError("recv: length prefix");
         return nullptr;
     }
     uint32_t data_length = ntohl(net_length);
-    #ifdef SSL_VERBOSE
-    std::cout << "Length prefix was:" << data_length << std::endl;
-    #endif
+    logDebug("Length prefix was: {}", data_length);
     // Allocate buffer for the data
     char* buffer = (char*)malloc(data_length);
     if (buffer == nullptr) {
-        std::cerr << "Memory allocation failed." << std::endl;
+        logError("Memory allocation failed.");
         return nullptr;
     }
 
@@ -218,14 +216,14 @@ char* NetworkUtils::receive_data_with_length_prefix(int sock_fd, size_t& length)
     while (total_received < data_length) {
         ssize_t bytes_received = recv(sock_fd, buffer + total_received, data_length - total_received, 0);
         if (bytes_received <= 0) {
-            perror("recv: data");
+            logError("recv: data");
             free(buffer);
             return nullptr;
         }
         total_received += bytes_received;
     }
 
-    std::cout << "Data that was transmitted:\n" << std::string(buffer,data_length);
+    logDebug("Data that was transmitted:\n{}", std::string(buffer, data_length));
 
     length = data_length;
     return buffer;
@@ -234,9 +232,7 @@ char* NetworkUtils::receive_data_with_length_prefix(int sock_fd, size_t& length)
 void NetworkUtils::prepare_data_with_length_prefix(std::vector<unsigned char>& buffer, const char* data, const size_t length) {
     // Clear the buffer to ensure it's empty before appending new data
     if(buffer.size() != 0){
-        #ifdef SSL_VERBOSE
-        std::cout << "Preperation to send length-prefixed data (normally certificate) failed. Buffer already contained elements!" << std::endl;
-        #endif
+        logDebug("Preparation to send length-prefixed data (normally certificate) failed. Buffer already contained elements!");
         buffer.clear();
     }
     // Prefix: 4 bytes for length
@@ -257,7 +253,7 @@ void NetworkUtils::prepare_data_with_length_prefix(std::vector<unsigned char>& b
 char* NetworkUtils::extract_data_with_length_prefix(const std::vector<unsigned char>& buffer, size_t& length) {
     // Ensure the buffer is large enough to contain the length prefix
     if (buffer.size() < sizeof(uint32_t)) {
-        std::cerr << "Buffer is too small to contain the length prefix." << std::endl;
+        logError("Buffer is too small to contain the length prefix.");
         return nullptr;
     }
 
@@ -268,14 +264,14 @@ char* NetworkUtils::extract_data_with_length_prefix(const std::vector<unsigned c
 
     // Ensure the buffer contains the full data as specified by the length prefix
     if (buffer.size() < sizeof(uint32_t) + data_length) {
-        std::cerr << "Buffer is smaller than expected data length." << std::endl;
+        logError("Buffer is smaller than expected data length.");
         return nullptr;
     }
 
     // Allocate buffer for the actual data
     char* data = (char*)malloc(data_length);
     if (data == nullptr) {
-        std::cerr << "Memory allocation failed." << std::endl;
+        logError("Memory allocation failed.");
         return nullptr;
     }
 
@@ -301,20 +297,20 @@ void SSLUtils::receive_certificate(int sock_fd, X509*& cert) {
     // Receive certificate
     char* cert_data = NetworkUtils::receive_data_with_length_prefix(sock_fd, length);
     if (!cert_data) {
-        std::cerr << "Failed to receive certificate data" << std::endl;
+        logError("Failed to receive certificate data");
         return;
     }
 
     BIO *bio = BIO_new_mem_buf(cert_data, length);
     if (!bio) {
-        std::cerr << "Failed to create BIO for certificate" << std::endl;
+        logError("Failed to create BIO for certificate");
         free(cert_data);
         return;
     }
 
     cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
     if (!cert) {
-        std::cerr << "Failed to read certificate" << std::endl;
+        logError("Failed to read certificate");
         ERR_print_errors_fp(stderr);
     }
 
@@ -382,7 +378,7 @@ X509* CertUtils::create_self_signed_cert(EVP_PKEY* pkey, const std::string& ipv6
 
     X509* x509 = X509_new();
     if (!x509) {
-        std::cerr << "Failed to create X509 object" << std::endl;
+        logError("Failed to create X509 object");
         return nullptr;
     }
 
@@ -408,7 +404,7 @@ X509* CertUtils::create_self_signed_cert(EVP_PKEY* pkey, const std::string& ipv6
     // Add extensions
     STACK_OF(X509_EXTENSION)* exts = sk_X509_EXTENSION_new_null();
     if (!exts) {
-        std::cerr << "Failed to create extension stack" << std::endl;
+        logError("Failed to create extension stack");
         X509_free(x509);
         return nullptr;
     }
@@ -417,7 +413,7 @@ X509* CertUtils::create_self_signed_cert(EVP_PKEY* pkey, const std::string& ipv6
     std::string san_string = "IP:" + ipv6;
     X509_EXTENSION* ext = X509V3_EXT_conf_nid(nullptr, nullptr, NID_subject_alt_name, san_string.c_str());
     if (!ext) {
-        std::cerr << "Failed to create Subject Alternative Name extension" << std::endl;
+        logError("Failed to create Subject Alternative Name extension");
         sk_X509_EXTENSION_free(exts);
         X509_free(x509);
         return nullptr;
@@ -427,7 +423,7 @@ X509* CertUtils::create_self_signed_cert(EVP_PKEY* pkey, const std::string& ipv6
     // Add custom 256-bit ID as an extension
     ASN1_OCTET_STRING* octet_string = ASN1_OCTET_STRING_new();
     if (!octet_string) {
-        std::cerr << "Failed to create ASN1_OCTET_STRING" << std::endl;
+        logError("Failed to create ASN1_OCTET_STRING");
         sk_X509_EXTENSION_free(exts);
         X509_free(x509);
         return nullptr;
@@ -437,7 +433,7 @@ X509* CertUtils::create_self_signed_cert(EVP_PKEY* pkey, const std::string& ipv6
 
     ext = X509_EXTENSION_create_by_NID(nullptr, NID_userId, 0, octet_string);
     if (!ext) {
-        std::cerr << "Failed to create custom ID extension" << std::endl;
+        logError("Failed to create custom ID extension");
         ASN1_OCTET_STRING_free(octet_string);
         sk_X509_EXTENSION_free(exts);
         X509_free(x509);
@@ -454,7 +450,7 @@ X509* CertUtils::create_self_signed_cert(EVP_PKEY* pkey, const std::string& ipv6
 
     // Sign the certificate
     if (!X509_sign(x509, pkey, EVP_sha256())) {
-        std::cerr << "Failed to sign certificate" << std::endl;
+        logError("Failed to sign certificate");
         X509_free(x509);
         return nullptr;
     }
@@ -473,7 +469,7 @@ SSL_CTX* SSLUtils::create_context(bool am_i_server) {
 
     ctx = SSL_CTX_new(method);
     if (!ctx) {
-        std::cerr << "Unable to create SSL context" << std::endl;
+        logError("Unable to create SSL context");
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
     }
@@ -519,37 +515,34 @@ bool SSLUtils::extract_custom_id(X509* cert, unsigned char* received_id) {
     // Get the index of the custom extension by its NID
     int ext_index = X509_get_ext_by_NID(cert, NID_userId, -1);
     if (ext_index == -1) {
-        std::cout << "\nError 1" << std::endl;
+        logDebug("Failed to find custom extension by NID.");
         return false; // Extension not found
     }
-    
+
     // Get the extension
     X509_EXTENSION* ext = X509_get_ext(cert, ext_index);
     if (!ext) {
-        std::cout << "\nError 2" << std::endl;
+        logError("Failed to get the custom extension.");
         return false; // Failed to get extension
     }
-    
+
     // Get the extension data
     ASN1_OCTET_STRING* octet_string = X509_EXTENSION_get_data(ext);
     if (!octet_string || !octet_string->data) {
-        std::cout << "\nError 3" << std::endl;
+        logError("No data found in custom extension.");
         return false; // No data found
     }
-    
+
     // Copy the data to the provided buffer
     std::memcpy(received_id, octet_string->data, 32);
 
-    #ifdef SSL_VERBOSE
-    std::cout << "Received ID as hex: ";
+    logDebug("Received ID as hex: ");
     Utils::print_hex(received_id, 32);
-    #endif
 
     return true; // Successfully extracted the ID
 }
 
-
-void SSLUtils::write_test_msg(SSL* ssl){
+void SSLUtils::write_test_msg(SSL* ssl) {
     const char *msg = "Hello";
     int len = strlen(msg);
     int bytes_written = SSL_write(ssl, msg, len);
@@ -558,35 +551,29 @@ void SSLUtils::write_test_msg(SSL* ssl){
         // Handle error
         int err = SSL_get_error(ssl, bytes_written);
         if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
-            // Retry SSL_write() based on err value.
-            std::cerr << "SSL write error 1" << std::endl;
+            logDebug("SSL write operation needs to be retried.");
         } else {
-            // Handle other errors
-            std::cerr << "SSL write error 2" << std::endl;
+            logError("SSL write operation failed with an error.");
         }
     }
-    return;
 }
 
-void SSLUtils::read_test_msg(SSL* ssl, char * buffer, size_t buflen){
+void SSLUtils::read_test_msg(SSL* ssl, char * buffer, size_t buflen) {
     int bytes_read = SSL_read(ssl, buffer, buflen-1);
 
     if (bytes_read > 0) {
         buffer[bytes_read] = '\0'; // Null-terminate the string
-        printf("Received: %s\n", buffer);
+        logInfo("Received message: {}", buffer);
     } else {
         // Handle error
         int err = SSL_get_error(ssl, bytes_read);
         if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
-            // Retry SSL_read() based on err value.
-            std::cerr << "SSL read error 1" << std::endl;
+            logDebug("SSL read operation needs to be retried.");
         } else {
-            // Handle other errors
-            std::cerr << "SSL read error 2" << std::endl;
+            logError("SSL read operation failed with an error.");
         }
     }
 }
-
 bool SSLUtils::compare_x509_certs(X509* cert1, X509* cert2) {
     if (!cert1 || !cert2) {
         return false;
@@ -731,14 +718,14 @@ X509* SSLUtils::load_cert_from_char(const unsigned char* cert_str, size_t cert_l
     BIO* bio = BIO_new_mem_buf(cert_str, cert_len);  // Create a new BIO with the certificate data
 
     if (!bio) {
-        std::cerr << "Failed to create BIO\n";
+        logError("Failed to create BIO");
         return nullptr;
     }
 
     X509* cert = PEM_read_bio_X509(bio, nullptr, 0, nullptr);  // Read the certificate
 
     if (!cert) {
-        std::cerr << "Failed to parse certificate\n";
+        logError("Failed to parse certificate");
         BIO_free(bio);  // Free the BIO object
         return nullptr;
     }
