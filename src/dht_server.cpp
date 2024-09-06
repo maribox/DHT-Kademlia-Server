@@ -2048,16 +2048,17 @@ void sig_c_handler(int signal){
         if(purger.joinable())
         {
             logDebug("sig_c_handler: Purger needs to be joined... initiating cv notify_all");
-            auto start_join = std::chrono::system_clock::now();
-            std::lock_guard<std::mutex> lk(stop_purger_cv_mutex);
-            stop_purger = true;
-            stop_purger_cv.notify_all();
+            {
+                std::lock_guard<std::mutex> lk(stop_purger_cv_mutex);
+                stop_purger = true;
+                stop_purger_cv.notify_all();
+            }
             purger.join();
-            auto join_duration = std::chrono::system_clock::now() - start_join;
-            logDebug("sig_c_handler: Purger joined after {} seconds", static_cast<int>(join_duration.count()));
+            logDebug("sig_c_handler: Purger joined.");
         }
         clean_up_SSL_Config();
         logDebug("sig_c_handler: Cleaned up ssl config");
+        logInfo("sig_c_handler: Cleaned up ssl config");
         exit(0);
     }
 }
@@ -2135,7 +2136,7 @@ bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms) { // only to be u
     int active_polling_rate_ms = 10;
     int max_tries = timeout_ms / active_polling_rate_ms;
     int current_tries = 0;
-    while (true) { // event count never -1 because epollout.
+    while (true) { // event count never 0 because epollout.
         switch(connection_info.ssl_stat) {
             case CONNECTED:
             case ACCEPTED:
@@ -2158,13 +2159,13 @@ bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms) { // only to be u
                 return false;
         }
 
-        int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), 5000);  // dangerous cast
+        int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), timeout_ms);  // dangerous cast
         logTrace("ensure_tls_blocking: new epoll event. Current SSL state: {}", connection_info.ssl_stat);
         if (event_count == -1) {
             if (errno == EINTR) { // for debugging purposes
                 continue;
             }
-            //TODO: Ask Marius about this if branching
+            //TODO: @Marius event_count == 0?
             logError("Couldn't build TLS tunnel: {}", strerror(errno));
             return false;
         }

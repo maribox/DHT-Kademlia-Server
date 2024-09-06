@@ -203,7 +203,7 @@ bool handle_EPOLLIN(int epollfd, const epoll_event &current_event);
 bool handle_EPOLLOUT(int epollfd, const epoll_event &current_event);
 
 socket_t set_socket_blocking(socket_t peer_socket, bool blocking);
-bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms = 300);
+bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms = 1000);
 
 int parse_commandline_args(int argc, const char* argv[]);
 

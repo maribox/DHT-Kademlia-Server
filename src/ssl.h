@@ -6,8 +6,7 @@
  * property for this. The file consists of multiple helper functions used for setting up and managing SSL. The higher
  * level abstraction was not the problem (ssl objects, contexts, etc.), but lower level datastructs and methods like BIO
  * struct handling, or even macros for pushing a stack of X509v3 extensions into the certificate object were tpo deep
- * to dig into. DO NOT GRADE THIS IN OUR FAVOR. (Putting together this frankensteins file with our server code still
- * took easily over 25 hrs)
+ * to dig into. (Putting together this frankensteins file with our server code still took easily over 25 hrs)
 */
 
 // Standard libraries
