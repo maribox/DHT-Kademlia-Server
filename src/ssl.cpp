@@ -688,7 +688,11 @@ SSLStatus SSLUtils::try_ssl_accept(SSL* ssl){
             return SSLStatus::PENDING_ACCEPT_READ;
         } else if (ssl_error == SSL_ERROR_WANT_WRITE) {
             return SSLStatus::PENDING_ACCEPT_WRITE;
+        } else if (ssl_error == SSL_ERROR_NONE) {
+            logTrace("Reached SSL_ERROR_NONE.");
+            return SSLStatus::CONNECTED;
         } else {
+            logError("Had Error on SSL ACCEPT: {}", strerror(errno));
             return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
         }
     }
@@ -703,6 +707,9 @@ SSLStatus SSLUtils::try_ssl_connect(SSL* ssl){
             return SSLStatus::PENDING_CONNECT_READ;
         } else if (ssl_error == SSL_ERROR_WANT_WRITE) {
             return SSLStatus::PENDING_CONNECT_WRITE;
+        } else if (ssl_error == SSL_ERROR_NONE) {
+            logTrace("Reached SSL_ERROR_NONE.");
+            return SSLStatus::CONNECTED;
         } else {
             return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
         }

@@ -2116,7 +2116,7 @@ bool run_with_timeout(Function&& func, std::chrono::seconds timeout, Args&&... a
     }
 }
 
-bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms) {
+bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms) { // only to be used as client
     logTrace("setup_tls_blocking: called setup_tls_blocking with local peer filedescriptor {}", peer_socket);
     set_socket_blocking(peer_socket, false);
 
@@ -2276,6 +2276,7 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
 
     size_t last_node_number;
     do {
+        logTrace("Starting new node expansion. We currently have {} nodes in the RoutingTable.", routing_table.count());
         perform_maintenance();
         last_node_number = routing_table.count();
         for (auto& bucket : routing_table.get_bucket_list()) {
@@ -2285,6 +2286,7 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
                 routing_table.try_add_peer(node);
             }
         }
+        perform_maintenance();
     } while (routing_table.count() != last_node_number);
 
     count = routing_table.count();
@@ -2325,7 +2327,7 @@ int main(int argc, char const *argv[])
          * 3. to join existing network: pass peer ip and port for p2p contact point
         */
         //Setup logger:
-        auto loglevel = spdlog::level::debug;
+        auto loglevel = spdlog::level::trace;
         auto loggerOpt = setup_Logger(loglevel);
         if(!loggerOpt.has_value())
         {

@@ -21,7 +21,7 @@ RUN cd /server/
 RUN mkdir /server/build
 RUN cmake /server -S /server -B /server/build
 RUN cmake --build /server/build/ --target dht_server -j
-ENTRYPOINT ["/server/build/dht_server"]
+#ENTRYPOINT ["/server/build/dht_server"]
 #ENTRYPOINT ["/bin/bash"]
 
 ## Creating an entrypoint.sh file in the root of the container is a common best practice.
