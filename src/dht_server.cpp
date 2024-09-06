@@ -56,8 +56,6 @@ static constexpr size_t DEFAULT_REPLICATION = 20; // should be same to K
 
 
 
-
-
 std::map<Key,std::pair<std::chrono::time_point<std::chrono::system_clock>, Value>> local_storage{};
 std::mutex storage_lock;
 
@@ -256,7 +254,7 @@ std::pair<bool,bool> flush_write_connInfo_with_SSL(ConnectionInfo &connection_in
                 return ret;
             } else {
                 tear_down_connection(epollfd,socketfd);
-                logError("Other SSL write error. Tore down connection.");
+                logError("Other SSL write error: {}. Tore down connection", err);
                 is_socket_still_up = false;
                 was_everything_sent = false;
                 return ret;
@@ -339,24 +337,21 @@ bool flush_read_connInfo_with_SSL(ConnectionInfo &connection_info, const int epo
      std::vector<unsigned char> temp_buffer(4096); // Temporary buffer for reading
 
     do{
+        ERR_clear_error();
         bytes_flushed = SSL_read(ssl,temp_buffer.data(),temp_buffer.size());
 
         if(bytes_flushed > 0){
             //Append bytes to recvbuf
             recvbuf.insert(std::end(recvbuf),std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
             temp_buffer.erase(std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
-        } else if (bytes_flushed == 0){
-            // Connection was closed by the peer
-            tear_down_connection(epollfd, socketfd);
-            return false; // Socket is down
         } else{
             int err = SSL_get_error(ssl,bytes_flushed);
             if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
                 // We should try reading or writing later, nothing to tear down
                 return true; // Socket is still up
             }
-            //An error occurred, tear down the connection
-            tear_down_connection(epollfd,socketfd);
+            logDebug("SSL read returned <= 0, error is: {} ", SSL_get_error(ssl, bytes_flushed));
+            tear_down_connection(epollfd, socketfd);
             return false; //Socket is down
         }
 
@@ -384,11 +379,13 @@ bool flush_read_connInfo_without_SSL(ConnectionInfo &connection_info, const int 
                 return true; // Socket is still up
             }else{
                 // An error occurred, tear down the connection
+                logDebug("An error occured during send without SSL. Tearing down connection.");
                 tear_down_connection(epollfd, socketfd);
                 return false; // Socket is down
             }
         }else if(bytes_flushed == 0){
             // Connection was closed by the peer
+            logDebug("Connection was closed by peer on send without SSL. Tearing down connection.");
             tear_down_connection(epollfd, socketfd);
             return false; // Socket is down
         }
@@ -634,6 +631,8 @@ std::vector<Node> blocking_node_lookup(Key &key, size_t number_of_nodes) {
                 socket_t peer_socket = setup_connect_socket(epollfd, node.addr, node.port, ConnectionType::P2P);
                 if (peer_socket != -1) {
                     if (!ensure_tls_blocking(peer_socket)) {
+                        logTrace("blocking_node_lookup: Couldn't build TLS. Tearing down connection.");
+                        tear_down_connection(epollfd, peer_socket);
                         routing_table.remove(node);
                         continue;
                     }
@@ -644,6 +643,8 @@ std::vector<Node> blocking_node_lookup(Key &key, size_t number_of_nodes) {
                     if (is_socket_still_up && everything_was_sent) {
                         expected_answers++;
                     } else {
+                        logTrace("blocking_node_lookup: Couldn't send message. Tearing down connection.");
+                        tear_down_connection(epollfd, peer_socket);
                         routing_table.remove(node);
                     }
                 } else {
@@ -747,6 +748,8 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
         if (peer_socket != -1) {
             add_epoll(epollfd, peer_socket, EPOLLIN);
             if (!ensure_tls_blocking(peer_socket)) {
+                logTrace("crawl_blocking_and_return: Couldn't build TLS. Tearing down connection.");
+                tear_down_connection(epollfd, peer_socket);
                 routing_table.remove(node);
                 continue;
             }
@@ -755,6 +758,8 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
             if (is_socket_still_up && everything_was_sent) {
                 expected_answers++;
             } else {
+                logTrace("crawl_blocking_and_return: Couldn't send message. Tearing down connection.");
+                tear_down_connection(epollfd, peer_socket);
                 routing_table.remove(node);
             }
         } else {
@@ -1068,6 +1073,8 @@ std::unordered_set<Node> perform_maintenance() {
             socket_t peer_socket = setup_connect_socket(epollfd, node.addr, node.port, ConnectionType::P2P);
             if (peer_socket != -1) {
                 if (!ensure_tls_blocking(peer_socket)) {
+                    logTrace("perform_maintenance: Couldn't build TLS. Tearing down connection.");
+                    tear_down_connection(epollfd, peer_socket);
                     stale_nodes.insert(node);
                     continue;
                 }
@@ -1553,6 +1560,7 @@ void accept_new_connection(int epollfd, const epoll_event &cur_event, Connection
 //Do heavy lifting certificate storage logic
 CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socket, ConnectionInfo &connection_info_emplaced){
     if(connection_info_emplaced.role != ConnectionRole::CLIENT){
+        logDebug("received_certificate_as_client: Tried to receive certificate as SERVER. Tearing down connection");
         tear_down_connection(epollfd,peer_socket);
         return CertificateStatus::ERRORED_CERTIFICATE;
     }
@@ -1577,21 +1585,21 @@ CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socke
     //Save foreign cert str
     unsigned char received_id[KEY_SIZE];
     if(!SSLUtils::extract_custom_id(foreign_certificate,received_id)){
-        logError("Failed to extract IPv6 from certificate.");
+        logError("received_certificate_as_client: Failed to extract IPv6 from certificate.");
         return CertificateStatus::ERRORED_CERTIFICATE;
     }
 
 
     std::string hex_id = Utils::bin_to_hex(received_id, KEY_SIZE);
-    logDebug("Hex ID received in certificate is: {}", hex_id);
+    logDebug("received_certificate_as_client: Hex ID received in certificate is: {}", hex_id);
 
     std::string ipv6_str{};
     if(!SSLUtils::extract_ipv6_from_cert(foreign_certificate,ipv6_str)){
-        logError("Failed to extract IPv6 from certificate.");
+        logError("received_certificate_as_client: Failed to extract IPv6 from certificate.");
         return CertificateStatus::ERRORED_CERTIFICATE;
     }
     if (SSLConfig::cert_map.find(hex_id) != SSLConfig::cert_map.end()) {
-        logDebug("Kademlia ID already recognized.");
+        logDebug("received_certificate_as_client: Kademlia ID already recognized.");
         //Compare certificates
         if(SSLUtils::compare_x509_cert_with_pem(foreign_certificate, SSLConfig::cert_map.find(hex_id)->second.second)){
             //Compare yielded equality:
@@ -1601,6 +1609,8 @@ CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socke
             //TODO: Maybe leave out because of time reasons. For now, assume that peer is not reachable
             return CertificateStatus::KNOWN_CERTIFICATE_CONTENT_MISMATCH;
         }
+    } else {
+        logDebug("received_certificate_as_client: The certificate is new or the predecessor of the kademlia was unreachable with our saved certificate");
     }
 
     // Else, meaning the certificate is new or the predecessor of the kademlia was unreachable with our saved certificate:
@@ -1621,6 +1631,7 @@ CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socke
         SSLConfig::cert_map.erase(hex_id);
         return CertificateStatus::ERRORED_CERTIFICATE;
     }
+    logTrace("received_certificate_as_client: Found new valid certificate. Returning.");
     return CertificateStatus::NEW_VALID_CERTIFICATE;
 }
 
@@ -1639,30 +1650,30 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
                 std::tie(is_socket_still_up, everything_was_sent) = flush_sendbuf(socketfd,connection_info,epollfd);
                 if(!is_socket_still_up){
                     //Connection got torn down due to error(s) on certificate transmission. Abort accepting.
-                    logTrace("handle_custom_ssl_protocol: left. ---------------------------");
+                    logTrace("handle_custom_ssl_protocol: left due to error(s) on certificate transmission. ---------------------------");
                     return false;
                 }
                 if(everything_was_sent){
                     connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
                     if(connection_info.ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
                         tear_down_connection(epollfd,socketfd);
-                        logTrace("handle_custom_ssl_protocol: left. ---------------------------");
+                        logTrace("handle_custom_ssl_protocol: left because try_ssl_accept returned fatal error. ---------------------------");
                         return false;
                     }
                     //We retried ssl_accept, but this time we guaranteed progressed ssl_stat to at least AWAITING_ACCEPT
-                    logTrace("handle_custom_ssl_protocol: left. ---------------------------");
+                    logTrace("handle_custom_ssl_protocol: left. We retried ssl_accept ---------------------------");
                     return true;
                 }
-                logTrace("handle_custom_ssl_protocol: left. ---------------------------");
+                logTrace("handle_custom_ssl_protocol: left. Socket is still up but not everything was sent ---------------------------");
                 return true;
             case SSLStatus::PENDING_ACCEPT_READ:
             case SSLStatus::PENDING_ACCEPT_WRITE:
                 connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
-                logTrace("handle_custom_ssl_protocol: left. ---------------------------");
+                logTrace("handle_custom_ssl_protocol: left after try_ssl_accept. ---------------------------");
                 return true;
             case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
                 tear_down_connection(epollfd,socketfd);
-                logTrace("handle_custom_ssl_protocol: left. ---------------------------");
+                logTrace("handle_custom_ssl_protocol: left because try_ssl_accept returned fatal error.. ---------------------------");
                 return false;
 
             //Server as already finished handshake (SSLStatus::ACCEPTED)->
@@ -1685,32 +1696,32 @@ bool handle_custom_ssl_protocol(int epollfd, socket_t socketfd, ConnectionInfo &
                 is_socket_still_up = flush_recvbuf(socketfd,connection_info,epollfd);
                 if(!is_socket_still_up){
                     //Connection got torn down due to error(s) on certificate reception. Abort connecting.
-                    logTrace("handle_custom_ssl_protocol: left. ---------------------------");
+                    logTrace("handle_custom_ssl_protocol: left. Connection got torn down due to error(s) on certificate reception---------------------------");
                     return false;
                 }
                 cs = receive_certificate_as_client(epollfd,socketfd,connection_info);
                 //Perform heavy lifting (certificate validation, persistent storage)
                 if(cs == CertificateStatus::NEW_VALID_CERTIFICATE || cs == CertificateStatus::EXPECTED_CERTIFICATE){
                     connection_info.ssl_stat = SSLUtils::try_ssl_connect(connection_info.ssl);
-                    logTrace("handle_custom_ssl_protocol: left. ---------------------------");
+                    logTrace("handle_custom_ssl_protocol: left. NEW_VALID_CERTIFICATE || EXPECTED_CERTIFICATE -> {}---------------------------", connection_info.ssl_stat);
                     return true;
                 }
                 if(cs == CertificateStatus::ERRORED_CERTIFICATE || cs == CertificateStatus::KNOWN_CERTIFICATE_CONTENT_MISMATCH){
                     tear_down_connection(epollfd,socketfd);
-                    logTrace("handle_custom_ssl_protocol: left. ---------------------------");
+                    logTrace("handle_custom_ssl_protocol: left. ERRORED_CERTIFICATE || KNOWN_CERTIFICATE_CONTENT_MISMATCH---------------------------");
                     return false;
                 }
                 //Certificate is not fully present yet. Return true, try again later.
-            logTrace("handle_custom_ssl_protocol: left. ---------------------------");
+            logTrace("handle_custom_ssl_protocol: left. Certificate is not fully present yet. Return true, try again later---------------------------");
                 return true;
             case SSLStatus::PENDING_CONNECT_READ:
             case SSLStatus::PENDING_CONNECT_WRITE:
                 connection_info.ssl_stat = SSLUtils::try_ssl_connect(connection_info.ssl);
-                logTrace("handle_custom_ssl_protocol: left. ---------------------------");
+                logTrace("handle_custom_ssl_protocol: left. Tried to ssl_connect again---------------------------");
                 return true;
             case SSLStatus::FATAL_ERROR_ACCEPT_CONNECT:
                 tear_down_connection(epollfd,socketfd);
-                logTrace("handle_custom_ssl_protocol: left. ---------------------------");
+                logTrace("handle_custom_ssl_protocol: left. FATAL_ERROR_ACCEPT_CONNECT---------------------------");
                 return false;
             //Client as already finished handshake (SSLStatus::CONNECTED)->
             default:
@@ -1771,6 +1782,7 @@ bool read_EPOLLIN(int epollfd, const epoll_event& current_event){
     socket_t socketfd = current_event.data.fd;
     if (!connection_map.contains(socketfd)) {
         //Should never happen.
+        logTrace("Connection map didn't contain socket anymore");
         tear_down_connection(main_epollfd, socketfd);
         return false;
     }
@@ -1780,7 +1792,7 @@ bool read_EPOLLIN(int epollfd, const epoll_event& current_event){
         flush_recvbuf(socketfd,connection_info,epollfd);
         return true; //Return early to distinguish from following ConnectionType::P2P
     }
-    //TODO: @Marius, any ideas why the following code is considered unreachable?
+
     if(!handle_custom_ssl_protocol(epollfd,socketfd,connection_info)){
         return false; //Socket was torn down by us.
     }
@@ -2156,6 +2168,7 @@ bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms) { // only to be u
             break;
             case FATAL_ERROR_ACCEPT_CONNECT:
                 logTrace("Fatal error on TLS Connection ACCEPT/CONNECT");
+                tear_down_connection(epollfd, peer_socket);
                 return false;
         }
 
@@ -2169,9 +2182,16 @@ bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms) { // only to be u
             logError("Couldn't build TLS tunnel: {}", strerror(errno));
             return false;
         }
-        if (!handle_custom_ssl_protocol(epollfd, peer_socket, connection_info) || current_tries > max_tries) {
+        if (current_tries > max_tries) {
+            logTrace("ensure_tls_blocking: Had more tries than max_tries so returned. Tearing down connection.");
+            return false;
+        }
+
+        if (!handle_custom_ssl_protocol(epollfd, peer_socket, connection_info) ) {
             logTrace("ensure_tls_blocking: handle_custom_ssl_protocol returned false.");
             return false;
+        } else {
+            logTrace("ensure_tls_blocking: handle_custom_ssl_protocol has possibly advanced our SSL state to: {}",connection_info.ssl_stat);
         }
         if (connection_info.ssl_stat == CONNECTED || connection_info.ssl_stat == ACCEPTED) {
             logDebug("setup_tls_blocking: Setup TLS Connection established.");

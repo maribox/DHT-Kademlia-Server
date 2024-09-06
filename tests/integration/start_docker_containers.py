@@ -9,7 +9,7 @@ import socket
 # This is not done automatically as to not potentially block your IP so you can check what IP range is free for you
 # example command:
 
-# docker network create --subnet 172.20.0.0/20 
+# docker network create --subnet=172.20.0.0/16 dht_network
 
 #wether to only print the run commands
 print_mode = True

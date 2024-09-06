@@ -6,7 +6,8 @@
  * property for this. The file consists of multiple helper functions used for setting up and managing SSL. The higher
  * level abstraction was not the problem (ssl objects, contexts, etc.), but lower level datastructs and methods like BIO
  * struct handling, or even macros for pushing a stack of X509v3 extensions into the certificate object were tpo deep
- * to dig into. (Putting together this frankensteins file with our server code still took easily over 25 hrs)
+ * to dig into. DO NOT GRADE THIS IN OUR FAVOR. (Putting together this frankensteins file with our server code still
+ * took easily over 25 hrs)
 */
 
 #include "common_types.h"
@@ -685,17 +686,15 @@ SSLStatus SSLUtils::try_ssl_accept(SSL* ssl){
         int ssl_error = SSL_get_error(ssl, ssl_accept_result);
         if (ssl_error == SSL_ERROR_WANT_READ){
             return SSLStatus::PENDING_ACCEPT_READ;
-        }
-        if (ssl_error == SSL_ERROR_WANT_WRITE) {
+        } else if (ssl_error == SSL_ERROR_WANT_WRITE) {
             return SSLStatus::PENDING_ACCEPT_WRITE;
-        }
-        if (ssl_error == SSL_ERROR_NONE) {
+        } else if (ssl_error == SSL_ERROR_NONE) {
             logTrace("Reached SSL_ERROR_NONE.");
             return SSLStatus::CONNECTED;
+        } else {
+            logError("Had Error on SSL ACCEPT: {}", strerror(errno));
+            return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
         }
-        logError("Had Error on SSL ACCEPT: {}", ssl_error);
-        return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
-
     }
     return SSLStatus::ACCEPTED;
 }
@@ -706,15 +705,14 @@ SSLStatus SSLUtils::try_ssl_connect(SSL* ssl){
         int ssl_error = SSL_get_error(ssl, ssl_connect_result);
         if (ssl_error == SSL_ERROR_WANT_READ){
             return SSLStatus::PENDING_CONNECT_READ;
-        }
-        if (ssl_error == SSL_ERROR_WANT_WRITE) {
+        } else if (ssl_error == SSL_ERROR_WANT_WRITE) {
             return SSLStatus::PENDING_CONNECT_WRITE;
-        }
-        if (ssl_error == SSL_ERROR_NONE) {
+        } else if (ssl_error == SSL_ERROR_NONE) {
             logTrace("Reached SSL_ERROR_NONE.");
             return SSLStatus::CONNECTED;
+        } else {
+            return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
         }
-        return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
     }
     return SSLStatus::CONNECTED;
 }
