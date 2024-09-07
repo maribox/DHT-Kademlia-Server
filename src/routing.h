@@ -70,8 +70,10 @@ class RoutingTable {
     const Node& get_local_node() const;
     const std::vector<KBucket>& get_bucket_list() const;
     static NodeID node_distance(const NodeID& node_1, const NodeID& node_2);
+    bool has_same_addr_or_id(const Node &node) const;
+
     template<typename Iterable>
-    static bool has_duplicate_id(const Iterable& nodes);
+    static bool has_duplicate_id(const Iterable& nodes); // debug function
 };
 
 template<typename Iterable>

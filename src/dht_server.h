@@ -34,6 +34,25 @@ using namespace std::chrono_literals;
 
 using socket_t  = int;
 
+enum ModuleApiType {
+    DHT_PUT = 650,
+    DHT_GET = 651,
+    DHT_SUCCESS = 652,
+    DHT_FAILURE = 653,
+};
+
+enum P2PType {
+    DHT_RPC_PING = 660,
+    DHT_RPC_STORE = 661,
+    DHT_RPC_FIND_NODE = 662,
+    DHT_RPC_FIND_VALUE = 663,
+    DHT_RPC_PING_REPLY = 670,
+    DHT_RPC_STORE_REPLY = 671,
+    DHT_RPC_FIND_NODE_REPLY = 672,
+    DHT_RPC_FIND_VALUE_REPLY = 673,
+    DHT_ERROR = 680
+};
+
 enum CertificateStatus{
     EXPECTED_CERTIFICATE = 0,
     NEW_VALID_CERTIFICATE,
@@ -110,29 +129,40 @@ struct ConnectionInfo{
     u_short client_port; // port in host byte order
     SSL* ssl;
     SSLStatus ssl_stat;
-    Key rpc_id;
+
     Message receive_bytes;
     Message send_bytes;
-    };
-
-enum ModuleApiType {
-    DHT_PUT = 650,
-    DHT_GET = 651,
-    DHT_SUCCESS = 652,
-    DHT_FAILURE = 653,
+};
+// TODO's for end of rewrite:
+// 1. look at every forge/handle call and check that epollfd socket order is correct
+// 2. Delete all declarations that are not defined in the .cpp
+// 3. is OperationType actually needed
+//
+enum class NodeLookupStatus {
+    AWAITING_FIRST_FIND_NODE_REPLY,
+    AWAITING_PEER_RESPONSES
 };
 
-enum P2PType {
-    DHT_RPC_PING = 660,
-    DHT_RPC_STORE = 661,
-    DHT_RPC_FIND_NODE = 662,
-    DHT_RPC_FIND_VALUE = 663,
-    DHT_RPC_PING_REPLY = 670,
-    DHT_RPC_STORE_REPLY = 671,
-    DHT_RPC_FIND_NODE_REPLY = 672,
-    DHT_RPC_FIND_VALUE_REPLY = 673,
-    DHT_ERROR = 680
+struct NodeLookup {
+    NodeLookupStatus node_lookup_status;
+    std::unordered_map<socket_t, bool> peer_response_status; // maps sockets of peers to whether they have responded to our FIND NODE request
+    std::unordered_set<Node&> received_nodes;
+    std::unordered_set<Node&> known_stale_nodes;
 };
+
+enum class OperationType {
+    NODE_LOOKUP_FOR_NETWORK_EXPANSION,
+};
+
+struct DHTInfo {
+    OperationType operation_type;
+    P2PType expected_p2p_reply;
+    NodeLookup* node_lookup;
+
+    Node contacted_node;
+    Key rpc_id;
+};
+
 
 enum ErrorType: u_short {
     DHT_BAD_REQUEST = 10,
@@ -142,21 +172,15 @@ enum ErrorType: u_short {
 
 
 
-
-
 bool operator<(const Key& lhs, const Key& rhs);
 bool operator<=(const Key& lhs, const Key& rhs);
 bool operator==(const Key& lhs, const Key& rhs);
-
-bool is_same_network_node_or_nodeid(const Node &lhs, const Node &rhs);
 
 std::string key_to_string(const Key& key);
 std::string ip_to_string(const in6_addr& ip);
 
 Value* get_from_storage(const Key& key);
-void save_to_storage(const Key& key, Value val);
-
-bool is_in_my_range(Key key);
+void save_to_storage(const Key &key, std::chrono::seconds ttl, Value &val);
 
 bool is_valid_module_API_type(u_short value);
 bool is_valid_P2P_type(u_short value);
@@ -166,7 +190,7 @@ void build_DHT_header(Message& message, size_t message_size, u_short message_typ
 void write_body(Message& message, size_t body_offset, const unsigned char* data, size_t data_size);
 void read_body(const Message& message, size_t body_offset, unsigned char* data, size_t data_size);
 
-void send_DHT_message(socket_t socketfd, const Message &message, int epollfd);
+void send_DHT_message(int epollfd, socket_t socketfd, const Message &message);
 
 std::vector<Node> blocking_node_lookup(Key &key, size_t number_of_nodes = K);
 void crawl_blocking_and_store(Key &key, Value &value, int time_to_live, int replication);
@@ -215,6 +239,8 @@ ProcessingStatus try_processing(socket_t curfd);
 
 void accept_new_connection(int epollfd, const epoll_event &cur_event, ConnectionType connection_type);
 void run_event_loop(socket_t module_api_socket, socket_t p2p_socket, int epollfd, std::vector<epoll_event>& epoll_events);
+
+
 
 int add_epoll(int epollfd, socket_t serversocket, uint32_t events);
 int mod_epoll(int epollfd, socket_t serversocket, uint32_t events);

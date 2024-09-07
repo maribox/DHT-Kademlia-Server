@@ -6,10 +6,6 @@
 
 // #include <print>
 
-bool is_same_network_node_or_nodeid(const Node& lhs, const Node& rhs) {
-    return lhs.id == rhs.id ||
-           (lhs.addr == rhs.addr && lhs.port == rhs.port);
-}
 
 KBucket::KBucket(const NodeID& start, const NodeID& end)
     : start(start), end(end), peers(), replacement_cache() {
@@ -133,6 +129,11 @@ NodeID RoutingTable::node_distance(const NodeID& node_1, const NodeID& node_2) {
     return distance;
 }
 
+bool RoutingTable::has_same_addr_or_id(const Node &node) const {
+    return local_node.id == node.id ||
+       (local_node.addr == node.addr && local_node.port == node.port);
+}
+
 std::vector<Node> RoutingTable::find_closest_nodes(NodeID target_node_id) {
     std::vector<Node> closest_nodes;
 
@@ -250,12 +251,10 @@ void RoutingTable::split_bucket(KBucket bucket, int depth) {
 //TODO: implement this. look at sections 2.2, 2.4, 4.2
 void RoutingTable::try_add_peer(const Node& peer) {
     // TODO: replace with function
-    if (is_same_network_node_or_nodeid(local_node, peer)) {
+    if (has_same_addr_or_id(peer)) {
         logDebug("Tried to add own node to RoutingTable. Returning");
         return;
     }
-    for (auto& bucket : bucket_list) {
-        if (bucket.get_start() <= peer.id  && peer.id <= bucket.get_end()) {
         // according to 2.4: "When u learns of a new contact, it  attempts to insert the contact in the appropriate k-bucket.
         // If that bucket  is  not full, the new contact is simply inserted. Otherwise, if the k-bucket’s range  includes u’s
         // own node ID, then the bucket  is split into two new buckets, the  old contents divided between the two, and the
@@ -264,13 +263,12 @@ void RoutingTable::try_add_peer(const Node& peer) {
         // according to 4.2: "The general splitting rule is that a node splits a full k-bucket if the  bucket’s range contains
         // the node’s own ID or the depth d of the k-bucket in the  routing tree satisfies  d !≡ 0 (mod b). (The depth is just
         // the length of the prefix  shared by all nodes in the k-bucket’s range.) The current implementation uses  b=5."
-            if (!bucket.add_peer(peer)) {
-                int depth = get_shared_prefix_bits(bucket);
-                if ((bucket.get_start() <= this->local_node.id && this->local_node.id <= bucket.get_end())
-                    || depth % 5 == 0) {
-                    split_bucket(bucket, depth);
-                }
-            }
+    auto& bucket = bucket_list.at(get_bucket_for(peer.id));
+    if (!bucket.add_peer(peer)) {
+        int depth = get_shared_prefix_bits(bucket);
+        if ((bucket.get_start() <= this->local_node.id && this->local_node.id <= bucket.get_end())
+            || depth % 5 == 0) {
+            split_bucket(bucket, depth);
         }
     }
 }
