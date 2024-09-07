@@ -12,16 +12,16 @@ import socket
 # docker network create --subnet=172.20.0.0/16 dht_network
 
 #wether to only print the run commands
-print_mode = True
+print_mode = False
 
-number_of_containers = 10 # obviously don't start more than 64009. But I also don't think your computer wants you to do that
+number_of_containers = 50 # obviously don't start more than 64009. But I also don't think your computer wants you to do that
 container_name = "dht_swarm"
 network_name = "dht_network"
 ip_prefix = f"172.20."
 base_module = 7000
 
 added_peers: Tuple[str, int] = [] # saved as pairs of (ip, p2p_port)
-
+__dirname__ = os.path.dirname(__file__)
 
 
 def start(ip: str, i: int):
@@ -47,13 +47,15 @@ def start(ip: str, i: int):
         status = os.system(start_command)
         if os.WIFEXITED(status):
             if os.WEXITSTATUS(status) == 125: #exit code when address already in use
-                print("Tried to an IP:PORT combo that was blocked. This should not happen in a docker network. (For starting on localhost: increment all port variables by 2 in a loop and try again)")
+                print(f"ERROR. Couldn't start container {i}.")
+                print(f"ERROR. If network is missing: Read comment at the top of the file")
+                print("Maybe tried to bind to address in use? This should not happen in a docker network. (For starting on localhost: increment all port variables by 2 in a loop and try again)")
                 return
     added_peers.append((ip, p2p_port))
     
 
 #build docker container
-os.system("docker build -t dht_swarm ../..")
+os.system(f"docker build -t dht_swarm {__dirname__}/../..")
 #start first container:
 start(f"{ip_prefix}0.2", 0)
 
@@ -62,6 +64,7 @@ for i in range (1, number_of_containers):
     ip_end = i % 253 + 2 # keep addresses between 2 and 254. We are currently assuming all are free and the network is "reserved for us"
     ip = ip_prefix + f"{subnet}.{ip_end}"
     start(ip, i)
+    time.sleep(0.5)
 
 
 

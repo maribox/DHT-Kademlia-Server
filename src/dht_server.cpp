@@ -768,7 +768,7 @@ void crawl_blocking_and_return(Key &key, socket_t socket) {
                 routing_table.remove(node);
                 continue;
             }
-            auto sent = forge_DHT_RPC_find_node(peer_socket, epollfd, key);
+            auto sent = forge_DHT_RPC_find_value(peer_socket, epollfd, key);
             auto [is_socket_still_up ,everything_was_sent] = flush_sendbuf(peer_socket, connection_map[peer_socket], epollfd);
             if (is_socket_still_up && everything_was_sent) {
                 expected_answers++;
@@ -839,10 +839,32 @@ bool handle_DHT_put(socket_t socket, u_short body_size) {
     Value value{};
     value.resize(value_size);
     read_body(message, 4 + KEY_SIZE, value.data(), value_size);
+
+    // node_lookup = new NodeLookup() (should initiate returned_nodes, potentially think about min capacity of K*ALPHA and requested_sockets/responeded_sockets, potentially cap. of K)
+    // protocol_map[socket].node_lookup = &node_lookup;
+    // node_lookup.reason = DHT_PUT
+    /*
+     * for (node : get_closest_nodes(key)) {
+     *  peer_socket = connect_socket();
+     *  protocol_map[peer_socket].node_lookup = &node_lookup;
+     *  send_find_node_rpc(peer_socket, key);
+     *  node_lookup.requested_sockets.push_back(peer_socket);
+     *  // for finished node lookup, we need to send a store request to all, but don't need to return to the module, so don't need to save socket
+     *  // If we don't get any responses, we only store ourselves
+     *      -> if we don't have any nodes, store directly
+     *      -> if we don't get any responses, ASYNC TIMEOUT-function
+     *  // If we are in the closest_nodes
+     *  }
+     */
+
     logInfo("Got request to set key '{}' to value '{}'", key_to_string(key), Utils::bin_to_hex(value.data(), value.size()));
+
+    /*
     std::thread([key, value, time_to_live, replication]() mutable {
         crawl_blocking_and_store(key, value, time_to_live, replication);
     }).detach();
+    */
+
     return true;
 }
 
@@ -857,10 +879,30 @@ bool handle_DHT_get(socket_t socket, u_short body_size) {
     const Message& message = connection_map[socket].receive_bytes;
     Key key;
     read_body(message, 0, key.data(), KEY_SIZE);
+
+    // node_lookup = new NodeLookup()  (should initiate returned_nodes, potentially think about min capacity of K*ALPHA and requested_sockets/responeded_sockets, potentially cap. of K)
+    // protocol_map[socket].node_lookup = &node_lookup;
+    // node_lookup.reason = DHT_GET
+    /*
+     * for (node : get_closest_nodes(key)) {
+     *  peer_socket = connect_socket();
+     *  protocol_map[peer_socket].node_lookup = &node_lookup;
+     *  send_find_node_rpc(peer_socket, key);
+     *  node_lookup.requested_sockets.push_back(peer_socket);
+     *  // for finished node lookup, we need to send a get request to all -> state transition to WAITING_FIND_VALUE_REPLY
+     *          -> continue in handle_FIND_VALUE_REPLY
+     *  // If we don't get any responses, we only get from ourselves (maybe think about doing this first -> faster response)
+     *      -> if we don't have any nodes, get directly, else DHT_FAILURE
+     *      -> if we don't get any responses, ASYNC TIMEOUT-function to send DHT_FAILURE
+     *  }
+     */
+
+    /*
     logInfo("Got request to get key '{}'", key_to_string(key));
     std::thread([key, socket]() mutable {
         crawl_blocking_and_return(key, socket);
     }).detach();
+    */
     return true;
 }
 
@@ -950,11 +992,11 @@ bool handle_DHT_RPC_ping_reply(const socket_t socket, const u_short body_size, s
     return true;
 }
 
-bool forge_DHT_RPC_store(socket_t socket, int epollfd, u_short time_to_live, Key &key, Value &value) {
+bool forge_DHT_RPC_store(socket_t socket, int epollfd, u_short time_to_live, const Key &key, const Value &value) {
     Key rpc_id = generate_random_nodeID();
     connection_map.at(socket).rpc_id = rpc_id;
 
-    size_t body_size = RPC_SUB_HEADER_SIZE + KEY_SIZE + value.size();;
+    size_t body_size = RPC_SUB_HEADER_SIZE + 2 + KEY_SIZE + value.size();;
     size_t message_size = HEADER_SIZE + body_size;
     u_short message_type = DHT_RPC_STORE;
     Message message(message_size);
@@ -973,11 +1015,11 @@ bool forge_DHT_RPC_store(socket_t socket, int epollfd, u_short time_to_live, Key
 }
 
 bool handle_DHT_RPC_store(const socket_t socket, const u_short body_size) {
-    if (body_size <= RPC_SUB_HEADER_SIZE + 4 + KEY_SIZE) {
+    if (body_size <= RPC_SUB_HEADER_SIZE + 2 + KEY_SIZE) {
         return false;
     }
     const Message& message = connection_map[socket].receive_bytes;
-    const u_short value_size = body_size - (RPC_SUB_HEADER_SIZE + 4 + KEY_SIZE);
+    const u_short value_size = body_size - (RPC_SUB_HEADER_SIZE + 2 + KEY_SIZE);
 
     const Key rpc_id = read_rpc_header(message, connection_map[socket].client_addr);
 
@@ -988,6 +1030,7 @@ bool handle_DHT_RPC_store(const socket_t socket, const u_short body_size) {
     read_body(message, RPC_SUB_HEADER_SIZE + 2, key.data(), KEY_SIZE);
     Value value{};
     value.resize(value_size);
+
     read_body(message, RPC_SUB_HEADER_SIZE + 2 + KEY_SIZE, value.data(), value_size);
 
     if (time_to_live > MAX_LIFETIME_SEC || time_to_live < MIN_LIFETIME_SEC) {
@@ -1187,6 +1230,52 @@ bool handle_DHT_RPC_find_node_reply(const socket_t socket, const u_short body_si
         return false;
     }
 
+    // add to protocol_map[socket].node_lookup->returned_closest_nodes
+    // add to protocol_map[socket].node_lookup->responded_sockets.push_back(socket)
+
+    // then, test whether all have responded yet, either here or in main by checking
+    // protocol_map[socket].node_lookup->responded_sockets.size() == protocol_map[socket].node_lookup->requested_sockets.size()
+    //
+    // if done (all returned) trigger something like this:
+    /*
+        bool found_new_nodes = false;
+        new_k_closest_nodes = std::unordered_set<Node>{};
+
+        for (const auto& node : sorted_closest_nodes) {
+            if (!protocol_map[socket].node_lookup->previous_k_closest_nodes.contains(node)) {
+                found_new_nodes = true;
+            }
+            new_k_closest_nodes.insert(node);
+            if (new_k_closest_nodes.size() >= number_of_nodes) {
+                break;
+            }
+        }
+        protocol_map[socket].node_lookup->previous_k_closest_nodes = new_k_closest_nodes;
+        if (!found_new_nodes) {
+            break;
+        }
+    }
+    if (sorted_closest_nodes.size() > number_of_nodes) {
+        logInfo("Lookup completed. Found {} closest nodes. Resizing to {}", sorted_closest_nodes.size(), number_of_nodes);
+        sorted_closest_nodes.resize(number_of_nodes);
+    } else {
+        logInfo("Lookup completed. Found {} out of {} closest nodes that were looked for.", sorted_closest_nodes.size(), number_of_nodes);
+    }
+    */
+    // if we did not get any more closest nodes:
+    /*
+    switch(protocol_map[socket].node_lookup->reason) {
+        case NETWORK_EXPANSION:
+            // test if we gathered more nodes than last time, if yes, repeat process
+            // if no, say network expansion completed with x nodes and return.
+        case STORE:
+            // call forge_DHT_store to closest nodes
+        case: FIND_VALUE:
+            // call forge_DHT_find_value
+    }
+    */
+
+
     bool created_closest_nodes = false;
     if (!closest_nodes_ptr) {
         closest_nodes_ptr = new std::unordered_set<Node>();
@@ -1272,7 +1361,8 @@ bool forge_DHT_RPC_find_value_reply(socket_t socket, int epollfd, Key rpc_id, co
     return true;
 }
 
-bool handle_DHT_RPC_find_value_reply(const socket_t socket, const u_short body_size, std::vector<Value>* found_values) {
+bool handle_DHT_RPC_find_value_reply(const socket_t socket, const u_short body_size) {
+    // If we don't expect this on this socket, protocol_map[socket].node_lookup == nullptr -> return false
     if (body_size <= RPC_SUB_HEADER_SIZE + KEY_SIZE) {
         return false;
     }
@@ -1282,19 +1372,15 @@ bool handle_DHT_RPC_find_value_reply(const socket_t socket, const u_short body_s
     if (!check_rpc_id(message, connection_map[socket].rpc_id)) {
         return false;
     }
-
     Key key;
     read_body(message, RPC_SUB_HEADER_SIZE, key.data(), KEY_SIZE);
     Value value{};
     value.resize(value_size);
     read_body(message, RPC_SUB_HEADER_SIZE + KEY_SIZE, value.data(), body_size - (RPC_SUB_HEADER_SIZE + KEY_SIZE));
-    if (found_values) {
-        found_values->push_back(value);
-        return true;
-    } else {
-        logWarn("Received find value reply without forge or without given found_values list");
-        return false;
-    }
+
+
+
+    //-> gather in protocol_map[socket].value_lookup->returned_values etc
 }
 
 bool forge_DHT_error(socket_t socket, int epollfd, ErrorType error) {
@@ -2544,7 +2630,8 @@ int main(int argc, char const *argv[])
     logDebug("Prepared the \"SSLConfig::\" (context, self-signed certificate,...) for all future P2P-data transmissions ");
 
     if(should_connect_to_network) {
-        if (!connect_to_network(peer_port, peer_address_string, peer_address)) {
+        // TODO joern -> epollfd und setup connect trennen, should only return socket
+        if (!setup_connect_socket(epollfd, peer_address, peer_port, {ConnectionType::P2P})) {
             return -1;
         }
     logInfo("Connection to existing network (provided peer) was successful");

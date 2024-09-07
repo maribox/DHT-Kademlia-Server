@@ -86,6 +86,23 @@ enum class ConnectionRole {
     SERVER = 0, CLIENT
 };
 
+enum class NetworkConnectionStatus {
+    TCP_CONNECTED,
+    AWAITING_FIND_NODE_REPLY, // first initial call to contact node, that returns its nodes that are close to our ID
+    PERFORMING_NETWORK_EXPANSION, // next, we do "network expansion"
+    // -> we generate random node ID's in every Bucket and do a node lookup request for those ID's
+    //
+    // Node Lookup:
+    // We first send out a bunch of requests to the nodes that we know of that are the closest to the given key
+    // after all the nodes returned, we again filter out the closest nodes from the ones we've received.
+    // If there are new ones, we send requests to the new ones
+    // We do this, until we don't find any new nodes.
+    //
+    // after every node lookup, we test whether we found any new nodes.
+    // We need to keep in mind to only count nodes that gave us a response to a FIND_NODE request
+    CONNECTED, // start accepting connections
+};
+
 struct ConnectionInfo{
     ConnectionType connection_type;
     ConnectionRole role;
