@@ -45,9 +45,9 @@ enum CertificateStatus{
 
 enum FlushResult
 {
-    EVERYTHING_WAS_SENT,
-    PARTIALLY_SENT,
-    ERROR_TO_TEAR
+    EVERYTHING_WAS_FLUSHED,
+    FLUSH_AGAIN,
+    FLUSH_FATAL
 };
 
 

@@ -2457,6 +2457,217 @@ std::optional<std::shared_ptr<spdlog::logger>> setup_Logger(spdlog::level::level
     }
 }
 
+//New functions for server-sided state machine progress (automaton logic)
+
+//TCP Handshake only, returns socket and ConenctionInfo filled with metadata.
+std::pair<socket_t,ConnectionInfo&> accept_connection(const epoll_event &current_event, ConnectionType connection_type)
+{
+    sockaddr_in6 client_addr{};
+    socklen_t client_addr_len = sizeof(client_addr);
+    ConnectionInfo connection_info{};
+
+    socket_t socketfd = accept4(current_event.data.fd, reinterpret_cast<sockaddr*>(&client_addr),
+                                &client_addr_len, SOCK_NONBLOCK);
+    //TODO: Debug if this works:
+    if(socketfd == -1){
+        if(errno == EAGAIN || errno == EWOULDBLOCK){
+            return {socketfd,connection_info};
+        }
+    }
+
+    u_short client_port = ntohs(client_addr.sin6_port);
+    connection_info.connection_type = connection_type;
+    connection_info.role = ConnectionRole::SERVER; //We are accepting, so we are server.
+    connection_info.client_addr = client_addr.sin6_addr;
+    connection_info.client_port = client_port;
+
+    logDebug("Accepted socket connection from {}:{}", ip_to_string(client_addr.sin6_addr), client_port);
+
+    return {socketfd, connection_info};
+}
+
+SSL* setup_SSL_for_connection(socket_t socketfd, bool am_i_server)
+{
+    logDebug("setup_SSL_for_connection: Setting up SSL for new connection. {}", am_i_server? "We are server." : "We are client.");
+    SSL* ssl;
+    if(am_i_server){
+        ssl = SSL_new(SSLConfig::server_ctx);
+    }else{
+        ssl = SSL_new(SSLConfig::client_ctx);
+    }
+
+    if(!ssl){
+        logError("Failure SSL object: SSL object null pointer");
+        return nullptr;
+    }
+    SSL_set_fd(ssl, socketfd);
+
+    /*
+     *#ifdef SSL_VERBOSE
+     *SSLUtils::check_ssl_blocking_mode(ssl);
+     *#endif
+     */
+
+    return ssl;
+}
+
+FlushResult flush_write_connInfo_with_SSL_New(SSL* ssl, Message& send_buf)
+{
+    ssize_t bytes_flushed;
+    do{
+        bytes_flushed = SSL_write(ssl,send_buf.data(),send_buf.size());
+        if(bytes_flushed <= 0){
+            int err = SSL_get_error(ssl, bytes_flushed);
+            if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
+                // Retry SSL_write() later.
+                logDebug("flush_write_connInfo_with_SSL: SSL write error, try again later");
+                return FLUSH_AGAIN;
+            }
+            logError("flush_write_connInfo_with_SSL: Other SSL write error: {}.", err);
+
+            return FLUSH_FATAL;
+        }
+        //Partial written, advance buffer accordingly.
+        send_buf.erase(std::begin(send_buf),std::begin(send_buf) + bytes_flushed);
+
+    } while(bytes_flushed > 0 && send_buf.size() > 0);
+
+    return EVERYTHING_WAS_FLUSHED;
+}
+
+FlushResult flush_write_connInfo_without_SSL_New(socket_t socketfd, Message& send_buf)
+{
+    ssize_t bytes_flushed;
+
+    do{
+        bytes_flushed = write(socketfd,send_buf.data(),send_buf.size());
+
+        if(bytes_flushed == -1){
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Retry write() later.
+                logDebug("flush_write_connInfo_without_SSL: Socket write error, try again later");
+                return FLUSH_AGAIN;
+            }
+            logError("flush_write_connInfo_without_SSL: Fatal socket write error.");
+            return FLUSH_FATAL;
+
+        }
+        //Partial written, advance buffer accordingly.
+        send_buf.erase(std::begin(send_buf),std::begin(send_buf) + bytes_flushed);
+    } while(bytes_flushed > 0 && !send_buf.empty());
+
+    return EVERYTHING_WAS_FLUSHED;
+}
+
+
+FlushResult flush_sendbuf_New(socket_t socketfd, ConnectionInfo & connection_info)
+{
+    if(send_buffer_empty(connection_info)){
+        return FlushResult::EVERYTHING_WAS_FLUSHED;
+    }
+
+    if(connection_info.connection_type == ConnectionType::MODULE_API){
+        //Easy flush, simply write without respecting ssl.
+        return flush_write_connInfo_without_SSL_New(socketfd,connection_info.send_bytes);
+    }
+
+    //We are in a ConnectionType::P2P
+    if(SSLUtils::isAliveSSL(connection_info.ssl_stat)){
+        return flush_write_connInfo_with_SSL_New(connection_info.ssl,connection_info.send_bytes);
+    }
+    return flush_write_connInfo_without_SSL_New(socketfd,connection_info.send_bytes);
+}
+
+
+
+//Returns: Can socket still be ordinarily used
+bool flush_read_buffer_with_SSL_New (SSL* ssl, Message& read_buf)
+{
+    int bytes_flushed;
+
+    std::vector<unsigned char> temp_buffer(4096); // Temporary buffer for reading
+
+    do{
+        ERR_clear_error();
+        bytes_flushed = SSL_read(ssl,temp_buffer.data(),temp_buffer.size());
+
+        if(bytes_flushed <= 0){
+            int err = SSL_get_error(ssl,bytes_flushed);
+            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+                // We should try reading or writing later, nothing to tear down
+                return true; // Socket is still up
+            }
+            logDebug("flush_read_buffer_with_SSL: SSL read returned <= 0, error is: {} ", SSL_get_error(ssl, bytes_flushed));
+            return false; //Socket is down
+        }
+        //Append bytes to recvbuf
+        read_buf.insert(std::end(read_buf),std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
+        temp_buffer.erase(std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
+    }while (bytes_flushed>0);
+
+    return true; //Dead branch
+}
+
+//Returns: Can socket still be ordinarily used
+bool flush_read_buffer_without_SSL_New(const socket_t socketfd, Message& read_buf)
+{
+    ssize_t bytes_flushed;
+
+    std::vector<unsigned char> temp_buffer(4096); // Temporary buffer for reading
+
+    do{
+        bytes_flushed = read(socketfd, temp_buffer.data(), temp_buffer.size());
+
+        if(bytes_flushed > 0){
+            //Append the bytes read to the read_buf
+            read_buf.insert(std::end(read_buf),std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
+            temp_buffer.erase(std::begin(temp_buffer),std::begin(temp_buffer) + bytes_flushed);
+        } else if (bytes_flushed == -1){
+            if(errno == EAGAIN || errno == EWOULDBLOCK){
+                // We should try reading later
+                return true; // Socket is still up
+            }
+
+            // An error occurred, tear down the connection
+            logDebug("flush_read_buffer_without_SSL: An error occured during send without SSL. Tearing down connection.");
+            return false; // Socket is down
+
+        } else if(bytes_flushed == 0){
+            // Connection was closed by the peer
+            logDebug("flush_read_buffer_without_SSL: Connection was closed by peer on send without SSL. Tearing down connection.");
+            return false; // Socket is down
+        }
+    } while (bytes_flushed > 0);
+
+    return true; //Socket is still up
+}
+
+
+//Returns: Can socket still be ordinarily used
+bool flush_recvbuf_New(socket_t socketfd, ConnectionInfo & connection_info){
+
+    if(connection_info.connection_type == ConnectionType::MODULE_API){
+        // Easy flush, simply read without respecting SSL
+        return flush_read_buffer_without_SSL_New(socketfd, connection_info.receive_bytes);
+    }
+
+    //We are in a ConnectionType::P2P
+    if(SSLUtils::isAliveSSL(connection_info.ssl_stat)){
+        return flush_read_buffer_with_SSL_New(connection_info.ssl, connection_info.receive_bytes);
+    }
+
+    // Else: SSL is not active (yet). P2P-Connections enforce TLS, so this will happen soon.
+    // Server & Client read without SSL encryption
+    return flush_read_buffer_without_SSL_New(socketfd, connection_info.receive_bytes);
+}
+
+//
+
+
+
+
+
+
 #ifndef TESTING1
 int main(int argc, char const *argv[])
     {
@@ -2630,8 +2841,8 @@ int main(int argc, char const *argv[])
     logDebug("Prepared the \"SSLConfig::\" (context, self-signed certificate,...) for all future P2P-data transmissions ");
 
     if(should_connect_to_network) {
-        // TODO joern -> epollfd und setup connect trennen, should only return socket
-        if (!setup_connect_socket(epollfd, peer_address, peer_port, {ConnectionType::P2P})) {
+        // TODO: MAYBE WRONG ARGUMENTS. CHECK TWICE.
+        if (!setup_connect_socket(main_epollfd, peer_address, peer_port, {ConnectionType::P2P})) {
             return -1;
         }
     logInfo("Connection to existing network (provided peer) was successful");
@@ -2670,15 +2881,53 @@ int main(int argc, char const *argv[])
             }
 
             if (current_event.data.fd == module_api_socket) {
+                //TODO: ONLY LISTEN ON PORTS AFTER INIT PHASE
                 //TCP Handshake only
+                auto [socketfd,connection_info] = accept_connection(current_event, ConnectionType::MODULE_API);
                 //Set metadata
-                accept_new_connection(main_epollfd, current_event, ConnectionType::MODULE_API);
+                connection_map.emplace(socketfd, connection_info);
                 logDebug("Accepted new connection on listening MODULE_API socket");
+
             } else if (current_event.data.fd == p2p_socket) {
+                //TODO: Ask Master, inline or extract?
                 //TCP Handshake only
-                /* ret value: socket + connectionInfo */accept_new_connection(main_epollfd, current_event, ConnectionType::P2P);
-                //add to connectionMap
-                //Initial state ssl_cert_want_write
+                auto [socketfd,connection_info] = accept_connection(current_event, ConnectionType::P2P);
+                SSL* ssl = setup_SSL_for_connection(socketfd, true);
+                connection_info.ssl = ssl;
+                connection_info.ssl_stat = SSLStatus::HANDSHAKE_SERVER_WRITE_CERT;
+                connection_map.emplace(socketfd, connection_info);
+                //Provide certificate to requesting peer
+                write_charptr_to_sendbuf(connection_info, SSLConfig::length_prefixed_cert_str, sizeof(uint32_t) + SSLConfig::cert_len);
+                FlushResult flushRes = flush_sendbuf_New(socketfd,connection_info);
+                //Advance SSL state depending on the flush-out result
+                if(flushRes == FLUSH_FATAL){
+                    SSL_free(ssl);
+                    close(socketfd);
+                    connection_map.erase(socketfd);
+                    continue;
+                }
+
+                auto epollEvent = epoll_event{};
+                epollEvent.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLET;
+                epollEvent.data.fd = socketfd;
+                epoll_ctl(main_epollfd, EPOLL_CTL_ADD, socketfd, &epollEvent);
+                //TODO: epoll_ctl could return -1, errno set.
+
+                if(flushRes == FLUSH_AGAIN)
+                {
+                    //EPOLLOUT will notify us
+                    continue;
+                }
+                //EVERYTHING_FLUSHED:
+                SSLStatus tried_accept = SSLUtils::try_ssl_accept(ssl);
+                connection_map.at(socketfd).ssl_stat = tried_accept;
+                if(tried_accept == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
+                    logError("Fatal error occurred on SSL accept. TCP connection was closed.");
+                    SSL_free(ssl);
+                    close(socketfd);
+                    connection_map.erase(socketfd);
+                    continue;
+                }
                 //SSL Connection setup (put certificate in sendbuffer and flush once)
                 //Further, use EPOLLET for callback when (partial) rest of message can be sent
                 logDebug("Accepted new connection on listening P2P socket");
