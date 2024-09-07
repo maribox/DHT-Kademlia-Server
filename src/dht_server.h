@@ -43,6 +43,13 @@ enum CertificateStatus{
     
 };
 
+enum FlushResult
+{
+    EVERYTHING_WAS_SENT,
+    PARTIALLY_SENT,
+    ERROR_TO_TEAR
+};
+
 
 enum ProcessingStatus{
     WAIT_FOR_COMPLETE_MESSAGE_HEADER = 0,

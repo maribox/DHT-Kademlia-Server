@@ -68,7 +68,15 @@ std::mutex stop_purger_cv_mutex;
 int main_epollfd;
 
 // Utility functions
+template <typename T>
+struct defer {
+    T const t;
+    explicit defer(T _t) : t(std::move(_t)){};
+    defer(defer const&) = delete;
+    ~defer() { t(); }
+};
 
+//defer close_http_socket{[&] { ::close(http_socket); }};
 
 
 
@@ -227,12 +235,14 @@ void tear_down_connection(int epollfd, socket_t socketfd){
 
     }else{
         //Should be a dead branch:
-        logError("Supposedly dead control flow branch reached in tear_down_connection(...)");
+        //TODO: Investigate
+        logDebug("tear_down_connection: tore down connection which was not yet contained in the connection_map");
         close(socketfd);
     }
 }
 
 
+//TODO: FlushResult instead of bool pair lol
 //Returns <is_socket_still_up?,everything_was_sent?>
 std::pair<bool,bool> flush_write_connInfo_with_SSL(ConnectionInfo &connection_info, const int epollfd, const int socketfd){
     auto &sendbuf = connection_info.send_bytes;
@@ -574,10 +584,15 @@ int process_answers_on_epollin(int epollfd, P2PType expected_type, std::function
         } else {
             for (int i = 0; i < event_count; i++) {
                 auto current_event = epoll_events[i];
+                if(current_event.events & EPOLLERR)
+                {
+                    //TODO make sure this socket is removed (bubbled up)
+                }
                 if (!(current_event.events & EPOLLIN)) {
                     logError("Set wrong EPOLL flag on epollfd");
-                    return false;
+                    return received_responses;
                 }
+
                 if (!read_EPOLLIN(epollfd, current_event)) {
                     logTrace("process_answers_on_epollin: couldn't read on socket. Invalidated.");
                     continue;
@@ -588,7 +603,7 @@ int process_answers_on_epollin(int epollfd, P2PType expected_type, std::function
                     logTrace("Received response on socket that's not in the connection_map. This shouldn't happen.");
                     continue;
                 }
-                auto& connection_info = connection_map[sockfd];
+                auto& connection_info = connection_map.at(sockfd);
 
                 u_short message_size = -1;
                 u_short dht_type = -1;
@@ -1598,20 +1613,19 @@ CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socke
         logError("received_certificate_as_client: Failed to extract IPv6 from certificate.");
         return CertificateStatus::ERRORED_CERTIFICATE;
     }
-    if (SSLConfig::cert_map.find(hex_id) != SSLConfig::cert_map.end()) {
-        logDebug("received_certificate_as_client: Kademlia ID already recognized.");
+    if (SSLConfig::cert_map.contains(hex_id)) {
+        logInfo("received_certificate_as_client: Kademlia ID already recognized.");
         //Compare certificates
         if(SSLUtils::compare_x509_cert_with_pem(foreign_certificate, SSLConfig::cert_map.find(hex_id)->second.second)){
             //Compare yielded equality:
             return CertificateStatus::EXPECTED_CERTIFICATE;
-        }else{
-            //Compare yielded difference. --> RPC_Ping old connection partner
-            //TODO: Maybe leave out because of time reasons. For now, assume that peer is not reachable
-            return CertificateStatus::KNOWN_CERTIFICATE_CONTENT_MISMATCH;
         }
-    } else {
-        logDebug("received_certificate_as_client: The certificate is new or the predecessor of the kademlia was unreachable with our saved certificate");
+        //Compare yielded difference. --> RPC_Ping old connection partner
+        //TODO: Maybe leave out because of time reasons. For now, assume that peer is not reachable
+        return CertificateStatus::KNOWN_CERTIFICATE_CONTENT_MISMATCH;
     }
+
+    logInfo("received_certificate_as_client: The certificate is new or the predecessor of the kademlia was unreachable with our saved certificate");
 
     // Else, meaning the certificate is new or the predecessor of the kademlia was unreachable with our saved certificate:
     // Add the new certificate to the map
@@ -1628,10 +1642,12 @@ CertificateStatus receive_certificate_as_client(int epollfd, socket_t peer_socke
 
     if (X509_STORE_add_cert(SSLConfig::client_cert_store, foreign_certificate) != 1) {
         logError("Failed to add certificate to trusted store.");
+
         SSLConfig::cert_map.erase(hex_id);
         return CertificateStatus::ERRORED_CERTIFICATE;
     }
-    logTrace("received_certificate_as_client: Found new valid certificate. Returning.");
+    logInfo("received_certificate_as_client: Found new valid certificate; Returning.");
+    PEM_write_X509(stdout,foreign_certificate);
     return CertificateStatus::NEW_VALID_CERTIFICATE;
 }
 
@@ -1910,6 +1926,8 @@ socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t po
         close(peer_socket);
         return -1;
     }
+
+    //Implement connect state, if errno is EAGAIN, retry connect()
     logTrace("setup_connect_socket: connect()ed socket to {}:{}",ip_to_string(connection_info.client_addr),connection_info.client_port);
 
     set_socket_blocking(peer_socket, false);
@@ -1978,8 +1996,10 @@ void prepare_SSL_Config(/*in_port_t host_p2p_port*/){
     SSLConfig::cert_map = CertUtils::load_certificate_map(SSLConfig::certmap_filename);*/
 
     //1. Init SSL library
-    SSL_load_error_strings();
+    SSL_library_init();
     OpenSSL_add_ssl_algorithms();
+    SSL_load_error_strings();
+
 
     //Generate Key-pair for signing certificates and DHKE
     SSLConfig::pkey = KeyUtils::generate_rsa_key();
@@ -2006,6 +2026,7 @@ void prepare_SSL_Config(/*in_port_t host_p2p_port*/){
         EVP_PKEY_free(SSLConfig::pkey);
         exit(EXIT_FAILURE);
     }
+    PEM_write_X509(stdout,SSLConfig::cert);
 
     BIO *bio = BIO_new(BIO_s_mem());
     PEM_write_bio_X509(bio, SSLConfig::cert);
@@ -2134,42 +2155,41 @@ bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms) { // only to be u
     set_socket_blocking(peer_socket, false);
 
 
-    std::vector<epoll_event> epoll_events{64};
+    std::vector<epoll_event> epoll_events{1}; //Is only the peer we want to join to
     auto start_time = std::chrono::steady_clock::now();
     if (!connection_map.contains(peer_socket)) {
         return false;
     }
 
-
     int epollfd = epoll_create1(0);
     add_epoll(epollfd, peer_socket, EPOLLIN | EPOLLOUT);
 
-    auto& connection_info = connection_map[peer_socket];
+    auto& connection_info = connection_map.at(peer_socket);
     int active_polling_rate_ms = 10;
     int max_tries = timeout_ms / active_polling_rate_ms;
     int current_tries = 0;
     while (true) { // event count never 0 because epollout.
         switch(connection_info.ssl_stat) {
+
             case CONNECTED:
-            case ACCEPTED:
                 logDebug("setup_tls_blocking: Setup TLS Connection established.");
                 logTrace("setup_tls_blocking: returning successfully.");
             return true;
             case PENDING_CONNECT_READ:
-            case PENDING_ACCEPT_READ:
                 epollfd = mod_epoll(epollfd, peer_socket, EPOLLIN);
             break;
             case PENDING_CONNECT_WRITE:
-            case PENDING_ACCEPT_WRITE:
                 epollfd = mod_epoll(epollfd, peer_socket, EPOLLOUT);
             break;
-            case HANDSHAKE_SERVER_WRITE_CERT: // Trying to connect to maybe inactive server -> sleep
             case HANDSHAKE_CLIENT_READ_CERT:
             break;
             case FATAL_ERROR_ACCEPT_CONNECT:
                 logTrace("Fatal error on TLS Connection ACCEPT/CONNECT");
                 tear_down_connection(epollfd, peer_socket);
                 return false;
+            default:
+                return false;
+
         }
 
         int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), timeout_ms);  // dangerous cast
@@ -2182,7 +2202,14 @@ bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms) { // only to be u
             logError("Couldn't build TLS tunnel: {}", strerror(errno));
             return false;
         }
-        if (current_tries > max_tries) {
+
+        if(event_count == 0)
+        {
+            //TODO
+        }
+
+
+        if (current_tries > max_tries) { //TODO: MAYBE USE FOR INSTEAD OF WHILE TRUE
             logTrace("ensure_tls_blocking: Had more tries than max_tries so returned. Tearing down connection.");
             return false;
         }
@@ -2190,9 +2217,10 @@ bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms) { // only to be u
         if (!handle_custom_ssl_protocol(epollfd, peer_socket, connection_info) ) {
             logTrace("ensure_tls_blocking: handle_custom_ssl_protocol returned false.");
             return false;
-        } else {
-            logTrace("ensure_tls_blocking: handle_custom_ssl_protocol has possibly advanced our SSL state to: {}",connection_info.ssl_stat);
         }
+
+        logTrace("ensure_tls_blocking: handle_custom_ssl_protocol has possibly advanced our SSL state to: {}",connection_info.ssl_stat);
+
         if (connection_info.ssl_stat == CONNECTED || connection_info.ssl_stat == ACCEPTED) {
             logDebug("setup_tls_blocking: Setup TLS Connection established.");
             logTrace("setup_tls_blocking: returning successfully.");
@@ -2257,8 +2285,13 @@ bool connect_to_network(u_short peer_port, const std::string &peer_address_strin
     logTrace("connect_to_network: Entered. Peer to connect to is {}:{}", peer_address_string, peer_port);
 
     //Create custom epoll loop for connect_to_network
+    //TODO Maybe free some stuff xd
     int epollfd = epoll_create1(0);
+    defer close_epollfd{[&] {::close(epollfd);} };
+
     socket_t peer_socket = setup_connect_socket(epollfd, peer_address, peer_port, {ConnectionType::P2P});
+    defer close_peer_socket{[&] {::close(peer_socket);} };
+
     logDebug("connect_to_network: The TCP setup of the socket to peer was {}", peer_socket == -1? "unsuccessful" : "successful");
     add_epoll(epollfd, peer_socket, EPOLLIN);
 
@@ -2348,7 +2381,7 @@ int main(int argc, char const *argv[])
          * 3. to join existing network: pass peer ip and port for p2p contact point
         */
         //Setup logger:
-        auto loglevel = spdlog::level::trace;
+        auto loglevel = spdlog::level::info;
         auto loggerOpt = setup_Logger(loglevel);
         if(!loggerOpt.has_value())
         {
@@ -2514,9 +2547,8 @@ int main(int argc, char const *argv[])
         if (!connect_to_network(peer_port, peer_address_string, peer_address)) {
             return -1;
         }
-    }
     logInfo("Connection to existing network (provided peer) was successful");
-
+    }
     //Start to periodically purge local_storage:
 
     constexpr std::chrono::seconds purging_period{MIN_LIFETIME_SEC/2};
@@ -2544,11 +2576,24 @@ int main(int argc, char const *argv[])
         }
         for (int i = 0; i < event_count; ++i) {
             const epoll_event &current_event = epoll_events[i];
+            if(current_event.events & EPOLLERR)
+            {
+                //Unexpected Ctrl+C or sth (ungracefully closed)
+                //Purge everything, close fd, remove of connection map (essentially tear_down_connection)
+            }
+
             if (current_event.data.fd == module_api_socket) {
+                //TCP Handshake only
+                //Set metadata
                 accept_new_connection(main_epollfd, current_event, ConnectionType::MODULE_API);
                 logDebug("Accepted new connection on listening MODULE_API socket");
             } else if (current_event.data.fd == p2p_socket) {
-                accept_new_connection(main_epollfd, current_event, ConnectionType::P2P);
+                //TCP Handshake only
+                /* ret value: socket + connectionInfo */accept_new_connection(main_epollfd, current_event, ConnectionType::P2P);
+                //add to connectionMap
+                //Initial state ssl_cert_want_write
+                //SSL Connection setup (put certificate in sendbuffer and flush once)
+                //Further, use EPOLLET for callback when (partial) rest of message can be sent
                 logDebug("Accepted new connection on listening P2P socket");
             } else {
                 bool socket_still_valid = true;
@@ -2559,13 +2604,22 @@ int main(int argc, char const *argv[])
                 // handle client processing of existing sessions
                 if (current_event.events & EPOLLIN)
                 {
+                    //1. Lookup all metadata for switch metadata.state
+                    //2. Flush read everything as user data (connectionInfo (for ssl encrypted or not)).
+                    //2. OR Flush read everything as tls protocol data: Follow TLS/SSL Handshake protocol by try_ssl_accept/connect().
+                    //3. Handle application-layer receive-buffer data (depending on state)
+                    //4. Write stuff into user-sendbuf dependent on preceeding received data
+                    //5. Try flush out everything (depending on ssl protocol state)
+                    //Note:  SSL ACCEPT OR CONNECT WILL FLUSH ALL BYTES FROM KERNEL SIDE.
+                    //-->handler function for each different state
                     logTrace("New EPOLLIN event. handle_EPOLLIN call...");
                     socket_still_valid = handle_EPOLLIN(main_epollfd,current_event);
                 }
                 if (socket_still_valid && current_event.events & EPOLLOUT){
-                    //Omitted the logging as this event is always triggered. This is not very efficient/nice...
-                    //It is hard to circumvent this behavior as some parts of our custom protocol
-                    //need a notification on either EPOLLIN and EPOLLOUT. Only waiting for either one is not sufficient.
+                    //Retrieve all metadata for switch metadata.state
+                    //Flush write all tls protocol data: Follow TLS/SSL Handshake protocol by try_ssl_accept/connect().
+
+
                     socket_still_valid = handle_EPOLLOUT(main_epollfd,current_event);
                 }
                 if (socket_still_valid && current_event.events & EPOLLERR){
@@ -2574,6 +2628,20 @@ int main(int argc, char const *argv[])
                 }
             }
         }
+
+        //Do some async tasks, enqueue them as output parameter for handle functions:
+
+        //Array of triples:
+        //timestamp now = chrono::now()
+        //for all where timestamp <= now , exec. function with args.
+        //[<timestep,std::function(function pointer), arguments>]
+        //[<timestep,function pointer, arguments>]
+        //[<timestep,function pointer, arguments>]
+        //Maybe std::variant, effectively union. Could be tricky
+
+        //build minimum over all remaining tasks and define next timeout
+
+        //WORK ON ALL ASYNC TASKS THAT ARE READY
     }
 
     logInfo("Server terminating. {}", server_is_running);

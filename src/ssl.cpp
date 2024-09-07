@@ -51,6 +51,39 @@ std::string SSLUtils::check_ssl_blocking_mode_to_string(SSL *ssl) {
     }
 }
 
+
+
+void SSLUtils::dump_x509_store(SSL_CTX* ctx) {
+    // Get the certificate store associated with the SSL_CTX
+    X509_STORE* store = SSL_CTX_get_cert_store(ctx);
+    if (!store) {
+        std::cerr << "Failed to retrieve X509 store from SSL_CTX" << std::endl;
+        return;
+    }
+
+    // Get the internal stack of certificates (X509_OBJECTs) in the store
+    STACK_OF(X509_OBJECT)* objs = X509_STORE_get0_objects(store);
+    if (!objs) {
+        std::cerr << "No certificates in X509 store" << std::endl;
+        return;
+    }
+
+    // Iterate over the certificates in the store
+    for (int i = 0; i < sk_X509_OBJECT_num(objs); i++) {
+        X509_OBJECT* obj = sk_X509_OBJECT_value(objs, i);
+        if (X509_OBJECT_get_type(obj) == X509_LU_X509) { // Ensure it's a certificate
+            X509* cert = X509_OBJECT_get0_X509(obj);
+
+            // Print the certificate details
+            std::cout << "Certificate " << i + 1 << ":" << std::endl;
+            X509_print_fp(stdout, cert); // Print in human-readable format
+            PEM_write_X509(stdout, cert); // Optionally print in PEM format
+        }
+    }
+}
+
+
+
 bool NetworkUtils::getIPv6(char* buffer, size_t size){
     ifaddrs *interfaces, *ifa;
     char ipstr[INET6_ADDRSTRLEN];
@@ -473,7 +506,10 @@ SSL_CTX* SSLUtils::create_context(bool am_i_server) {
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
     }
-    if(!am_i_server){
+    if(am_i_server)
+    {
+        SSL_CTX_set_verify(ctx,SSL_VERIFY_NONE,nullptr);
+    }else{
         SSL_CTX_set_verify(ctx,SSL_VERIFY_PEER,nullptr); //nullptr callback function --> default verification is used.
     }
 
@@ -680,39 +716,50 @@ bool SSLUtils::compare_x509_cert_with_pem(X509* received_cert, const std::string
     return result;
 }
 
+void custom_error_investigation()
+{
+    std::vector<char> custom_error_msg(4096);
+    unsigned long errorLong =  ERR_get_error();
+    ERR_error_string_n(errorLong,custom_error_msg.data(),custom_error_msg.size());
+    logError("SSL error investigation: {}",custom_error_msg);
+}
+
 SSLStatus SSLUtils::try_ssl_accept(SSL* ssl){
+    ERR_clear_error();
     int ssl_accept_result = SSL_accept(ssl);
     if(ssl_accept_result <= 0){
         int ssl_error = SSL_get_error(ssl, ssl_accept_result);
         if (ssl_error == SSL_ERROR_WANT_READ){
             return SSLStatus::PENDING_ACCEPT_READ;
-        } else if (ssl_error == SSL_ERROR_WANT_WRITE) {
-            return SSLStatus::PENDING_ACCEPT_WRITE;
-        } else if (ssl_error == SSL_ERROR_NONE) {
-            logTrace("Reached SSL_ERROR_NONE.");
-            return SSLStatus::CONNECTED;
-        } else {
-            logError("Had Error on SSL ACCEPT: {}", strerror(errno));
-            return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
         }
+        if (ssl_error == SSL_ERROR_WANT_WRITE) {
+            return SSLStatus::PENDING_ACCEPT_WRITE;
+        }
+        logError("Had Error on SSL ACCEPT: {}", ssl_error);
+        custom_error_investigation();
+        //dump_x509_store(SSL_get_SSL_CTX(ssl));
+
+
+        return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
     }
     return SSLStatus::ACCEPTED;
 }
 
 SSLStatus SSLUtils::try_ssl_connect(SSL* ssl){
+    ERR_clear_error();
     int ssl_connect_result = SSL_connect(ssl);
     if(ssl_connect_result <= 0){
         int ssl_error = SSL_get_error(ssl, ssl_connect_result);
         if (ssl_error == SSL_ERROR_WANT_READ){
             return SSLStatus::PENDING_CONNECT_READ;
-        } else if (ssl_error == SSL_ERROR_WANT_WRITE) {
-            return SSLStatus::PENDING_CONNECT_WRITE;
-        } else if (ssl_error == SSL_ERROR_NONE) {
-            logTrace("Reached SSL_ERROR_NONE.");
-            return SSLStatus::CONNECTED;
-        } else {
-            return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
         }
+        if (ssl_error == SSL_ERROR_WANT_WRITE) {
+            return SSLStatus::PENDING_CONNECT_WRITE;
+        }
+        logError("Had Error on SSL CONNECT: {}", ssl_error);
+        custom_error_investigation();
+        //dump_x509_store(SSL_get_SSL_CTX(ssl));
+        return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
     }
     return SSLStatus::CONNECTED;
 }
