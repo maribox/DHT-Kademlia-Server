@@ -42,7 +42,8 @@
 using CertificateMap = std::unordered_map<std::string, std::pair<in_port_t,std::string>>; //maps P2P-ID to <port,certificate>
 
 enum SSLStatus: int{
-    HANDSHAKE_SERVER_WRITE_CERT = -6,   //Server status: Server has not been able to flush certificate (send). Retry until fully flushed.
+    TCP_PENDING = -7,
+    HANDSHAKE_SERVER_WRITE_CERT,   //Server status: Server has not been able to flush certificate (send). Retry until fully flushed.
     HANDSHAKE_CLIENT_READ_CERT,         //Client status: Client has not been able to receive full server certificate. Retry until fully available.
     PENDING_ACCEPT_READ,                    //Server status: Transitioned from HANDSHAKE_SERVER_WRITE_CERT. Server has fully flushed certificate. Wants to accept() for the client's connect(). NOTE: Status with PENDING... means that we want to accept next.
     PENDING_ACCEPT_WRITE,                    //Server status: Transitioned from HANDSHAKE_SERVER_WRITE_CERT. Server has fully flushed certificate. Wants to accept() for the client's connect(). NOTE: Status with PENDING... means that we want to accept next.

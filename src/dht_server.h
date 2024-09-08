@@ -257,3 +257,18 @@ bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms = 1000);
 
 int parse_commandline_args(int argc, const char* argv[]);
 
+/*
+ * Server Callstack for ssl_accept new connection:
+ * init_accept_ssl -> HANDSHAKE_SERVER_WRITE_CERT (possibly even --> PENDING_ACCEPT_READ/WRITE)
+ * HANDSHAKE_SERVER_WRITE_CERT -> EPOLLOUT(flush_sendbuf) -> PENDING_ACCEPT_READ/WRITE
+ * PENDING_ACCEPT_READ/WRITE -> try_ssl_accept() -> try_ssl_accept() -> ... -> try_ssl_accept() -> ACCEPTED
+ */
+
+
+/*
+ * Client Callstack for ssl_connect to new connection:
+ * init_tcp_connect_ssl -> TCP_PENDING
+ * TCP_PENDING -> retry_tcp_connect_ssl -> HANDSHAKE_CLIENT_READ_CERT
+ * HANDSHAKE_CLIENT_READ_CERT -> init_connect_ssl -> PENDING_CONNECT_READ/WRITE
+ * PENDING_CONNECT_READ/WRITE -> try_ssl_connect  -> try_ssl_connect -> ... -> try_ssl_connect -> CONNECTED
+ */

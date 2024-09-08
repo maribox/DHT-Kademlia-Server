@@ -2167,6 +2167,46 @@ std::pair<socket_t,ConnectionInfo&> accept_connection(const epoll_event &current
     return {socketfd, connection_info};
 }
 
+
+std::pair<socket_t,ConnectionInfo&> connect_connection(const in6_addr& address, u_int16_t port, const ConnectionType connection_type)
+{
+    ConnectionInfo connection_info{};
+    socket_t peer_socketfd = socket(AF_INET6, SOCK_STREAM | O_NONBLOCK, 0);
+    if (peer_socketfd == -1) {
+        logError("connect_connection: Failed to create client socket on port {}.",port);
+        return {-1,connection_info};
+    }
+
+    sockaddr_in6 addr{};
+    addr.sin6_family = AF_INET6;
+    addr.sin6_port = htons(port);
+    addr.sin6_addr = address;
+
+    static constexpr int ONE = 1;
+    setsockopt(peer_socketfd, SOL_SOCKET, SO_KEEPALIVE, &ONE, sizeof(ONE));
+
+    connection_info.connection_type = connection_type;
+    connection_info.role = ConnectionRole::CLIENT;
+    connection_info.client_addr = address;
+    connection_info.client_port = port;
+    connection_info.ssl_stat = TCP_PENDING;
+
+    logTrace("connect_connection: connect() call...", port);
+    if (connect(peer_socketfd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == -1) {
+        if(errno == EAGAIN)
+        {
+            //No problem, we stay in TCP_PENDING and finish the handshake later (EPOLL)
+            return {peer_socketfd,connection_info};
+        }
+        logError("connect_connection: Nonblocking connect to {}:{} failed fatally. Errno: {}", ip_to_string(address), port, strerror(errno));
+        close(peer_socketfd);
+        return {-1,connection_info};
+    }
+    connection_info.ssl_stat = HANDSHAKE_CLIENT_READ_CERT;
+    return {peer_socketfd,connection_info};
+
+}
+
 SSL* setup_SSL_for_connection(socket_t socketfd, bool am_i_server)
 {
     logDebug("setup_SSL_for_connection: Setting up SSL for new connection. {}", am_i_server? "We are server." : "We are client.");
@@ -2191,6 +2231,8 @@ SSL* setup_SSL_for_connection(socket_t socketfd, bool am_i_server)
 
     return ssl;
 }
+
+
 
 FlushResult flush_write_connInfo_with_SSL_New(SSL* ssl, Message& send_buf)
 {
@@ -2341,6 +2383,132 @@ bool flush_recvbuf_New(socket_t socketfd, ConnectionInfo & connection_info){
     // Server & Client read without SSL encryption
     return flush_read_buffer_without_SSL_New(socketfd, connection_info.receive_bytes);
 }
+
+
+
+/*
+ *Client callstack for connect:
+ *[,] = connect_connection()
+ *ssl = setup_ssl_for_connection(,false)
+ *con_info.ssl = ssl;
+ *etc...
+ *
+ */
+
+socket_t init_tcp_connect_ssl(int epollfd, const in6_addr& address, u_int16_t port, const ConnectionType connection_type)
+{
+    logTrace("init_connect_ssl called.");
+    auto &[socketfd,connection_info] = connect_connection(address, port, connection_type);
+
+    //TODO, maybe move this to the next connect function in line.
+    SSL* ssl = setup_SSL_for_connection(socketfd,false);
+    connection_info.ssl = ssl;
+
+    connection_map[socketfd] = connection_info;
+    logTrace("init_connect_ssl: added newly connecting peer to global connection_map.");
+
+    add_to_epoll(epollfd,socketfd);
+    return socketfd;
+}
+
+bool retry_tcp_connect_ssl(socket_t socketfd, ConnectionInfo connection_info)
+{
+    sockaddr_in6 addr{};
+    addr.sin6_family = AF_INET6;
+    addr.sin6_port = htons(connection_info.client_port);
+    addr.sin6_addr = connection_info.client_addr;
+
+    logTrace("retry_tcp_connect_ssl: connect() call...", connection_info.client_port);
+    if (connect(socketfd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == -1) {
+        if(errno == EAGAIN)
+        {
+            //No problem, we stay in TCP_PENDING and finish the handshake later (EPOLL)
+            return true;
+        }
+        logError("retry_tcp_connect_ssl: Nonblocking connect to {}:{} failed fatally. Errno: {}", ip_to_string(addr.sin6_addr), connection_info.client_port, strerror(errno));
+        close(socketfd);
+        return false;
+    }
+    connection_info.ssl_stat = HANDSHAKE_CLIENT_READ_CERT; //Let EPOLLIN notify us next :)
+    return true;
+
+}
+
+
+//MANDATORY: ssl_stat must be transitioned to SSLStatus::HANDSHAKE_CLIENT_READ_CERT before calling this function
+bool init_connect_ssl(int epollfd, socket_t socketfd, ConnectionInfo &connection_info)
+{
+    SSL *ssl = connection_info.ssl;
+    CertificateStatus cert_stat = receive_certificate_as_client(epollfd, socketfd, connection_info);
+    if(cert_stat == CertificateStatus::ERRORED_CERTIFICATE || cert_stat == CertificateStatus::KNOWN_CERTIFICATE_CONTENT_MISMATCH){
+        //Abort the connection. Could be a malicious Peer! Abort, abort!
+        logWarn("proceed_connect_ssl: Receiving certificate from server was faulty, e.g. syntactically/ corrupted OR attemt to spoof Identity of well-known peer");
+        return false;
+    }
+    if(cert_stat == CertificateStatus::CERTIFICATE_NOT_FULLY_PRESENT){
+        logTrace("proceed_connect_ssl: Received certificate is not fully present yet. Wait for more bytes.");
+        return true; //fd is valid, but wait for more bytes.
+    }
+    logTrace("proceed_connect_ssl: Received certificate is in a valid state. Now, try_ssl_connect()");
+    //Else: cert_stat is either NEW_VALID_CERTIFICATE  or EXPECTED_CERTIFICATE, continue with protocol.
+    //New certificate saved or recognized previously trusted certificate.
+    //Advance to at least SSLStatus::AWAITING_ACCEPT :)
+
+    connection_info.ssl_stat = SSLUtils::try_ssl_connect(ssl);
+    if (connection_info.ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT) {
+        logError("proceed_connect_ssl: try_ssl_connect() failed fatally, tear down the connection");
+        return false;
+    }
+    logTrace("proceed_connect_ssl: SSL State transitioned to {}",connection_info.ssl_stat);
+    return true;
+}
+
+bool init_accept_ssl(int epollfd, const epoll_event& current_event, ConnectionType connection_type)
+{
+    logTrace("fully_accept called.");
+    auto &[socketfd,connection_info] = accept_connection(current_event, ConnectionType::P2P);
+    SSL* ssl = setup_SSL_for_connection(socketfd, true);
+    connection_info.ssl = ssl;
+    connection_info.ssl_stat = SSLStatus::HANDSHAKE_SERVER_WRITE_CERT;
+    connection_map.emplace(socketfd, connection_info);
+    //Provide certificate to requesting peer
+    write_charptr_to_sendbuf(connection_info, SSLConfig::length_prefixed_cert_str, sizeof(uint32_t) + SSLConfig::cert_len);
+    FlushResult flushRes = flush_sendbuf_New(socketfd,connection_info);
+    //Advance SSL state depending on the flush-out result
+    if(flushRes == FLUSH_FATAL){
+        SSL_free(ssl);
+        close(socketfd);
+        connection_map.erase(socketfd);
+        return false;
+    }
+
+    add_to_epoll(epollfd,socketfd);
+    //TODO: epoll_ctl could return -1, errno set.
+
+    if(flushRes == FLUSH_AGAIN)
+    {
+        //EPOLLOUT will notify us
+        return true;
+    }
+    //EVERYTHING_FLUSHED:
+    SSLStatus tried_accept = SSLUtils::try_ssl_accept(ssl);
+    connection_map.at(socketfd).ssl_stat = tried_accept;
+    if(tried_accept == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
+        logError("fully_accept: Fatal error occurred on SSL accept. TCP connection was closed.");
+        SSL_free(ssl);
+        close(socketfd);
+        connection_map.erase(socketfd);
+        return false;
+    }
+    //SSL Connection setup (put certificate in sendbuffer and flush once)
+    //Further, use EPOLLET for callback when (partial) rest of message can be sent
+    logDebug("fully_accept: Accepted new connection on listening P2P socket");
+}
+
+
+
+
+
 
 //
 
@@ -2564,7 +2732,7 @@ int main(int argc, char const *argv[])
             if (current_event.data.fd == module_api_socketfd) {
                 //TODO: ONLY LISTEN ON PORTS AFTER INIT PHASE
                 //TCP Handshake only
-                auto [socketfd,connection_info] = accept_connection(current_event, ConnectionType::MODULE_API);
+                auto &[socketfd,connection_info] = accept_connection(current_event, ConnectionType::MODULE_API);
                 //Set metadata
                 connection_map.emplace(socketfd, connection_info);
                 logDebug("Accepted new connection on listening MODULE_API socket");
@@ -2572,46 +2740,8 @@ int main(int argc, char const *argv[])
             } else if (current_event.data.fd == p2p_socketfd) {
                 //TODO: Ask Master, inline or extract?
                 //TCP Handshake only
-                auto [socketfd,connection_info] = accept_connection(current_event, ConnectionType::P2P);
-                SSL* ssl = setup_SSL_for_connection(socketfd, true);
-                connection_info.ssl = ssl;
-                connection_info.ssl_stat = SSLStatus::HANDSHAKE_SERVER_WRITE_CERT;
-                connection_map.emplace(socketfd, connection_info);
-                //Provide certificate to requesting peer
-                write_charptr_to_sendbuf(connection_info, SSLConfig::length_prefixed_cert_str, sizeof(uint32_t) + SSLConfig::cert_len);
-                FlushResult flushRes = flush_sendbuf_New(socketfd,connection_info);
-                //Advance SSL state depending on the flush-out result
-                if(flushRes == FLUSH_FATAL){
-                    SSL_free(ssl);
-                    close(socketfd);
-                    connection_map.erase(socketfd);
-                    continue;
-                }
+                socket_t newly_accepted_socketfd = init_accept_ssl(main_epollfd,current_event,ConnectionType::P2P);
 
-                auto epollEvent = epoll_event{};
-                epollEvent.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLET;
-                epollEvent.data.fd = socketfd;
-                epoll_ctl(main_epollfd, EPOLL_CTL_ADD, socketfd, &epollEvent);
-                //TODO: epoll_ctl could return -1, errno set.
-
-                if(flushRes == FLUSH_AGAIN)
-                {
-                    //EPOLLOUT will notify us
-                    continue;
-                }
-                //EVERYTHING_FLUSHED:
-                SSLStatus tried_accept = SSLUtils::try_ssl_accept(ssl);
-                connection_map.at(socketfd).ssl_stat = tried_accept;
-                if(tried_accept == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
-                    logError("Fatal error occurred on SSL accept. TCP connection was closed.");
-                    SSL_free(ssl);
-                    close(socketfd);
-                    connection_map.erase(socketfd);
-                    continue;
-                }
-                //SSL Connection setup (put certificate in sendbuffer and flush once)
-                //Further, use EPOLLET for callback when (partial) rest of message can be sent
-                logDebug("Accepted new connection on listening P2P socket");
             } else {
                 bool socket_still_valid = true;
                 if (!connection_map.contains(current_event.data.fd)) {
