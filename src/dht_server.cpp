@@ -307,7 +307,7 @@ void send_DHT_message(socket_t socketfd, const Message &message) {
 
 // P2P utility functions
 
-void build_RPC_header(Message& message, Key& rpc_id) {
+void build_RPC_header(Message& message, const Key& rpc_id) {
     NodeID node_id = routing_table.get_local_node().id;
     u_short port = routing_table.get_local_node().port;
     u_short network_order_port = htons(port);
@@ -385,7 +385,7 @@ void start_node_refresh(int epollfd, Request* request) { // TODO: currently only
 }
 
 
-void add_new_nodes_from_node_refresh(Request* request, const std::unordered_set<Node>& received_closest_nodes) {
+void add_new_nodes_from_node_refresh(const Request* request, const std::unordered_set<Node>& received_closest_nodes) {
     for (auto& node : received_closest_nodes) {
         if (!routing_table.has_same_addr_or_id(node) && node.is_valid_node() &&
             !request->known_stale_nodes.contains(node)) {
@@ -429,17 +429,18 @@ ProcessingStatus handle_DHT_put(int epollfd, socket_t socketfd, u_short body_siz
 
     logInfo("Got request to set key '{}' to value '{}'", key_to_string(key), Utils::bin_to_hex(value.data(), value.size()));
 
-    for (auto& node : routing_table.find_closest_nodes(key)) {
-        Request request{{}}; // TODO: @ Master ok?
-        request_map[socketfd] = RequestInfo {
-            {RequestType::NODE_LOOKUP_FOR_PUT},
-            {P2PType::DHT_RPC_FIND_NODE_REPLY},
-            &request
-        };
-        request.key = key;
-        request.value = value;
-        start_node_lookup(epollfd, &request, NODE_LOOKUP_FOR_PUT, key);
-    }
+    Request request{{}}; // TODO: @ Master ok?
+    request_map[socketfd] = RequestInfo {
+        {RequestType::NODE_LOOKUP_FOR_PUT},
+        {P2PType::DHT_RPC_FIND_NODE_REPLY},
+        &request
+    };
+    request.key = key;
+    request.value = value;
+    request.time_to_live = time_to_live;
+    request.checked_nodes_count = replication;
+
+    start_node_lookup(epollfd, &request, NODE_LOOKUP_FOR_PUT, key);
 
     return SUCCESS_CLOSE;
 }
@@ -467,7 +468,7 @@ ProcessingStatus handle_DHT_get(int epollfd, socket_t socketfd, u_short body_siz
     return SUCCESS_CLOSE;
 }
 
-void forge_DHT_success(int epollfd, socket_t socketfd, const Key &key, const Value &value) {
+void forge_DHT_success(socket_t socketfd, const Key &key, const Value &value) {
     size_t message_size = HEADER_SIZE + KEY_SIZE + value.size();
     Message message(message_size);
 
@@ -480,11 +481,11 @@ void forge_DHT_success(int epollfd, socket_t socketfd, const Key &key, const Val
     send_DHT_message(socketfd, message);
 }
 
-ProcessingStatus handle_DHT_success(socket_t socketfd, u_short body_size) { // shouldn't receive these requests on MODULE API
+ProcessingStatus handle_DHT_success() { // shouldn't receive these requests on MODULE API
     return PROCESSING_ERROR;
 }
 
-void forge_DHT_failure(int epollfd, socket_t socketfd, Key &key) {
+void forge_DHT_failure(socket_t socketfd, const Key &key) {
     size_t message_size = HEADER_SIZE + KEY_SIZE;
     Message message(message_size);
 
@@ -495,7 +496,7 @@ void forge_DHT_failure(int epollfd, socket_t socketfd, Key &key) {
     send_DHT_message(socketfd, message);
 }
 
-ProcessingStatus handle_DHT_failure(socket_t socketfd, u_short body_size) {
+ProcessingStatus handle_DHT_failure() {
     return PROCESSING_ERROR; // shouldn't receive these requests on MODULE API
 }
 
@@ -525,7 +526,7 @@ ProcessingStatus handle_DHT_RPC_ping(const int epollfd, socket_t socketfd, const
     return SUCCESS_KEEP_OPEN;
 }
 
-void forge_DHT_RPC_ping_reply(int epollfd, socket_t socketfd, Key rpc_id) {
+void forge_DHT_RPC_ping_reply(int epollfd, socket_t socketfd, const Key &rpc_id) {
     size_t body_size = RPC_SUB_HEADER_SIZE;
     size_t message_size = HEADER_SIZE + body_size;
     u_short message_type = DHT_RPC_PING_REPLY;
@@ -599,7 +600,7 @@ ProcessingStatus handle_DHT_RPC_store(int epollfd, const socket_t socketfd, cons
 }
 
 // think about removing store reply, then close socket in above function
-void forge_DHT_RPC_store_reply(int epollfd, socket_t socketfd, Key rpc_id, Key &key, Value &value) {
+void forge_DHT_RPC_store_reply(int epollfd, socket_t socketfd, const Key &rpc_id, const Key &key, const Value &value) {
     size_t body_size = RPC_SUB_HEADER_SIZE + KEY_SIZE + value.size();;
     size_t message_size = HEADER_SIZE + body_size;
     u_short message_type = DHT_RPC_STORE_REPLY;
@@ -648,7 +649,7 @@ ProcessingStatus handle_DHT_RPC_store_reply(const socket_t socketfd, const u_sho
 }
 
 // callee must ensure entry in request_map
-void forge_DHT_RPC_find_node(socket_t socketfd, NodeID target_node_id) {
+void forge_DHT_RPC_find_node(socket_t socketfd, const NodeID &target_node_id) {
     Key rpc_id = generate_random_nodeID();
     request_map.at(socketfd).rpc_id = rpc_id;
 
@@ -684,7 +685,7 @@ ProcessingStatus handle_DHT_RPC_find_node(int epollfd, const socket_t socketfd, 
     return SUCCESS_KEEP_OPEN;
 }
 
-void forge_DHT_RPC_find_node_reply(int epollfd, socket_t socketfd, Key rpc_id, std::vector<Node> closest_nodes) {
+void forge_DHT_RPC_find_node_reply(int epollfd, socket_t socketfd, const Key &rpc_id, std::vector<Node> closest_nodes) {
     size_t body_size = RPC_SUB_HEADER_SIZE + closest_nodes.size() * NODE_SIZE;
     size_t message_size = HEADER_SIZE + body_size;
     u_short message_type = DHT_RPC_FIND_NODE_REPLY;
@@ -834,7 +835,7 @@ ProcessingStatus handle_DHT_RPC_find_node_reply(int epollfd, const socket_t sock
                     start_node_lookup(epollfd, request, request_map.at(socketfd).request_type, key);
                 } else { // we are closest to the given key. Send respective requests
                     logDebug("Found closest nodes to key {}.", key_to_string(key));
-                    //logInfo("Sending 'FIND NODE' request to closest nodes of given key {}", key_to_string(key));
+                    //logInfo("Sending 'FIND NODE' request to the closest nodes of given key {}", key_to_string(key));
                     for (auto& peer_node : request->previous_closest_nodes) {
                         socket_t peer_socketfd = init_tcp_connect_ssl(epollfd, peer_node.addr, peer_node.port, ConnectionType::P2P);
                         if (peer_socketfd == -1) {
@@ -855,13 +856,15 @@ ProcessingStatus handle_DHT_RPC_find_node_reply(int epollfd, const socket_t sock
                 }
             } // else we should wait for more nodes to reply. We don't need to do anyting else here.
         break;
-        default: ;
+        default:
+            logError("Reached invalid request state");
+        return PROCESSING_ERROR;
     }
 
     return SUCCESS_CLOSE;
 }
 
-void forge_DHT_RPC_find_value(int epollfd, socket_t socketfd, Key &key) {
+void forge_DHT_RPC_find_value(int epollfd, socket_t socketfd, const Key &key) {
     Key rpc_id = generate_random_nodeID();
     request_map.at(socketfd).rpc_id = rpc_id;
 
@@ -890,8 +893,7 @@ ProcessingStatus handle_DHT_RPC_find_value(int epollfd, const socket_t socketfd,
     Key key;
     read_body(message, RPC_SUB_HEADER_SIZE, key.data(), KEY_SIZE);
 
-    auto val_ptr = get_from_storage(key);
-    if (val_ptr) {
+    if (auto val_ptr = get_from_storage(key)) {
         forge_DHT_RPC_find_value_reply(epollfd, socketfd, rpc_id, key, *val_ptr);
     } else {
         auto closest_nodes = routing_table.find_closest_nodes(key);
@@ -900,7 +902,7 @@ ProcessingStatus handle_DHT_RPC_find_value(int epollfd, const socket_t socketfd,
     return SUCCESS_KEEP_OPEN;
 }
 
-void forge_DHT_RPC_find_value_reply(int epollfd, socket_t socketfd, Key rpc_id, const Key &key, const Value &value) {
+void forge_DHT_RPC_find_value_reply(int epollfd, socket_t socketfd, const Key &rpc_id, const Key &key, const Value &value) {
     u_short message_type = DHT_RPC_FIND_VALUE_REPLY;
     size_t body_size = RPC_SUB_HEADER_SIZE + KEY_SIZE + value.size();
     size_t message_size = HEADER_SIZE + body_size;
@@ -953,7 +955,7 @@ ProcessingStatus handle_DHT_RPC_find_value_reply(int epollfd, const socket_t soc
         Value most_frequent_value = std::ranges::max_element(frequency_map, [](const auto& element1, const auto& element2){ return element1.second < element2.second; })->first;
 
         // TODO: ensure requested socket is still the same as before! If not the request needs to be stopped, e.g. by setting requested_socket to -1
-        forge_DHT_success(epollfd, request->requested_socket, key, most_frequent_value);
+        forge_DHT_success(request->requested_socket, key, most_frequent_value);
     }
     free(request);
     return SUCCESS_CLOSE;
@@ -1037,9 +1039,9 @@ ProcessingStatus handle_API_request(int epollfd, socket_t socketfd, const u_shor
         case DHT_GET:
             return handle_DHT_get(epollfd, socketfd, body_size);
         case DHT_SUCCESS:
-            return handle_DHT_success(socketfd, body_size);
+            return handle_DHT_success();
         case DHT_FAILURE:
-            return handle_DHT_failure(socketfd, body_size);
+            return handle_DHT_failure();
     }
     return PROCESSING_ERROR;
 }
@@ -1052,7 +1054,7 @@ ProcessingStatus handle_P2P_request(int epollfd, socket_t socketfd, const u_shor
             case DHT_RPC_STORE:
                 return handle_DHT_RPC_store(epollfd, socketfd, body_size);
             case DHT_RPC_FIND_NODE:
-                return handle_DHT_RPC_find_node(epollfd,socketfd, body_size);
+                return handle_DHT_RPC_find_node(epollfd, socketfd, body_size);
             case DHT_RPC_FIND_VALUE:
                 return handle_DHT_RPC_find_value(epollfd, socketfd, body_size);
             case DHT_RPC_PING_REPLY:
