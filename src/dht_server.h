@@ -54,7 +54,8 @@ enum P2PType {
 enum HandleResult {
     SUCCESS_CLOSE,
     SUCCESS_KEEP_OPEN,
-    FATAL_FAILURE,
+    INVALID_P2P_REQUEST,
+    FATAL_HANDLE_ERROR,
 };
 
 enum CertificateStatus{
@@ -85,7 +86,7 @@ enum ProcessingStatus{
     WAIT_FOR_COMPLETE_MESSAGE_BODY = 1,
     PROCESSED = 1<<1,
     MORE_TO_READ = 1<<2,
-    ERROR = 1<<3
+    PROCESSING_ERROR = 1<<3
 };
 
 namespace ServerConfig {
@@ -242,7 +243,7 @@ void forge_DHT_RPC_ping_reply(int epollfd, socket_t socket, Key rpc_id);
 HandleResult handle_DHT_RPC_ping_reply(socket_t socket, u_short body_size, std::unordered_set<socket_t>* successfully_pinged_sockets);
 
 void forge_DHT_RPC_store(socket_t socket, u_short time_to_live, Key& key, Value& value);
-HandleResult handle_DHT_RPC_store(socket_t socket, u_short body_size);
+HandleResult handle_DHT_RPC_store(int epollfd, socket_t socket, u_short body_size);
 void forge_DHT_RPC_store_reply(int epollfd, socket_t socket, Key rpc_id, Key& key, Value& value);
 HandleResult handle_DHT_RPC_store_reply(socket_t socket, u_short body_size);
 
@@ -252,7 +253,7 @@ void forge_DHT_RPC_find_node_reply(int epollfd, socket_t socket, Key rpc_id, std
 HandleResult handle_DHT_RPC_find_node_reply(int epollfd, socket_t socket, u_short body_size);
 
 void forge_DHT_RPC_find_value(socket_t socket, Key& key);
-HandleResult handle_DHT_RPC_find_value(socket_t socket, u_short body_size);
+HandleResult handle_DHT_RPC_find_value(int epollfd, socket_t socket, u_short body_size);
 void forge_DHT_RPC_find_value_reply(int epollfd, socket_t socket, Key rpc_id, const Key& key, const Value& value);
 HandleResult handle_DHT_RPC_find_value_reply(socket_t socket, u_short body_size, std::vector<Value>* found_values);
 

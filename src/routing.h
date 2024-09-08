@@ -11,8 +11,7 @@
 #include "dht_server.h"
 #include "common_types.h"
 
-extern const size_t K;
-extern const size_t ALPHA;
+static constexpr size_t MAX_REPLACMENT_CACHE_SIZE = 3*K;
 
 class KBucket {
    private:
@@ -58,13 +57,13 @@ class RoutingTable {
     bool remove(const in6_addr& ip, const in_port_t& port);
     bool remove(const Node &target_node);
 
-    size_t get_bucket_for(NodeID key);
+    size_t get_bucket_for(NodeID key) const;
 
-    std::vector<Node> find_closest_nodes(NodeID node_id);
+    std::vector<Node> find_closest_nodes(const NodeID &node_id) const;
 
     RoutingTable(const in6_addr& ip, const in_port_t& port, const NodeID& id = generate_random_nodeID());
-    int get_shared_prefix_bits(KBucket bucket);
-    void split_bucket(KBucket bucket, int depth);
+    static int get_shared_prefix_bits(const KBucket& bucket);
+    void split_bucket(const KBucket& bucket, int depth);
 
     RoutingTable() = default;
     const Node& get_local_node() const;

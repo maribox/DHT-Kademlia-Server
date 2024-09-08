@@ -14,9 +14,9 @@ KBucket::KBucket(const NodeID& start, const NodeID& end)
 bool KBucket::add_peer(const Node &peer) { // returns true if inserted or already in the list, false if inserted into replacement cache -> split
     // according to 2.2: "Each k-bucket is kept sorted by time last seen—least-recently seen node  at the head, most-recently seen at the tail."
     // therefore, try to find and then move to back
-    auto it = std::ranges::find(peers, peer);
-    if (it != peers.end()) {
-        peers.erase(it);
+    auto peers_it = std::ranges::find(peers, peer);
+    if (peers_it != peers.end()) {
+        peers.erase(peers_it);
         peers.push_back(peer);
         logTrace("Tried to add existing node {} with ip {}:{} to RoutingTable", key_to_string(peer.id), ip_to_string(peer.addr), peer.port);
         return true;
@@ -29,14 +29,19 @@ bool KBucket::add_peer(const Node &peer) { // returns true if inserted or alread
         // according to 4.1, we have a replacement cache that gets filled if the K_Bucket is full.
         // "The replacement cache is kept sorted by time last seen, with the most  recently seen entry having the highest priority as a replacement candidate."
         // we keep it sorted in the same way as the peers list, so the last entry is the most recently seen
-        auto it = std::ranges::find(replacement_cache, peer);
-        if (it != replacement_cache.end()) {
-            replacement_cache.erase(it);
+        auto cache_it = std::ranges::find(replacement_cache, peer);
+        if (cache_it != replacement_cache.end()) {
+            replacement_cache.erase(cache_it);
+            replacement_cache.push_back(peer);
+            return false;
+        } else if (replacement_cache.size() < MAX_REPLACMENT_CACHE_SIZE) {
+            replacement_cache.push_back(peer);
+            logDebug("Added new node {} with ip {}:{} to replacement cache", key_to_string(peer.id), ip_to_string(peer.addr), peer.port);
+            return false;
+        } else {
+            logDebug("Tried to add node {} with ip {}:{} to replacement cache but was full", key_to_string(peer.id), ip_to_string(peer.addr), peer.port);
+            return false;
         }
-        replacement_cache.push_back(peer);
-        logDebug("Added new node {} with ip {}:{} to replacement cache", key_to_string(peer.id), ip_to_string(peer.addr), peer.port);
-        return false;
-        // TODO: Think about max size of raplcement cache? If yes, remove from front
     }
 }
 
@@ -111,14 +116,15 @@ bool RoutingTable::remove(const Node& target_node) {
     return false;
 }
 
-size_t RoutingTable::get_bucket_for(NodeID node_id) {
+size_t RoutingTable::get_bucket_for(NodeID node_id) const {
     for (size_t bucket_i = 0; bucket_i < bucket_list.size(); bucket_i++) {
         auto& bucket = bucket_list.at(bucket_i);
         if (bucket.get_start() <= node_id && node_id <= bucket.get_end()) {
             return bucket_i;
         }
     }
-    return -1;
+    logCritical("Couldn't find valid bucket for target_node_id. The RoutingTable is in an invalid state");
+    return 0;
 }
 
 NodeID RoutingTable::node_distance(const NodeID& node_1, const NodeID& node_2) {
@@ -130,7 +136,7 @@ NodeID RoutingTable::node_distance(const NodeID& node_1, const NodeID& node_2) {
 }
 
 void RoutingTable::sort_by_distance_to(std::vector<Node> nodes, Key key) {
-    std::ranges::sort(nodes,[this, key](const Node& node_1, const Node& node_2)
+    std::ranges::sort(nodes,[key](const Node& node_1, const Node& node_2)
         {return RoutingTable::node_distance(node_1.id, key) < RoutingTable::node_distance(node_2.id, key);});
 }
 
@@ -139,15 +145,15 @@ bool RoutingTable::has_same_addr_or_id(const Node &node) const {
        (local_node.addr == node.addr && local_node.port == node.port);
 }
 
-std::vector<Node> RoutingTable::find_closest_nodes(NodeID target_node_id) {
+std::vector<Node> RoutingTable::find_closest_nodes(const NodeID &target_node_id) const {
     std::vector<Node> closest_nodes;
 
 
-    int bucket_index_left = get_bucket_for(target_node_id) - 1;
-    int bucket_index_right = bucket_index_left + 1;
+    size_t bucket_index_right = get_bucket_for(target_node_id);
+    auto bucket_index_left = static_cast<ssize_t>(bucket_index_right - 1);
 
-    int added_on_left = 0;
-    int added_on_right = 0;
+    size_t added_on_left = 0;
+    size_t added_on_right = 0;
 
     while((added_on_left < K && bucket_index_left >= 0)) { // add up to K on the left
         closest_nodes.insert(closest_nodes.end(),
@@ -183,10 +189,10 @@ RoutingTable::RoutingTable(const in6_addr& ip, const in_port_t& port,
     first_bucket_start.fill(0);
     NodeID first_bucket_end;
     first_bucket_end.fill(255);
-    bucket_list.push_back(KBucket(first_bucket_start, first_bucket_end));
+    bucket_list.emplace_back(first_bucket_start, first_bucket_end);
 }
 
-int RoutingTable::get_shared_prefix_bits(KBucket bucket) {
+int RoutingTable::get_shared_prefix_bits(const KBucket& bucket) {
     // if bucket full and d !≡ 0 (mod 6), try to split
     // -> check length of prefix shared by all nodes in k-bucket's range
     int shared_prefix_bits = 0;
@@ -209,7 +215,7 @@ int RoutingTable::get_shared_prefix_bits(KBucket bucket) {
     return shared_prefix_bits;
 }
 
-void RoutingTable::split_bucket(KBucket bucket, int depth) {
+void RoutingTable::split_bucket(const KBucket& bucket, int depth) {
     // TODO: replacement cache
     // e.g. // e.g. 110|0|000 - // e.g. 110|1|111 -> depth == index of bit to switch, in this example 3
     auto start_first = bucket.get_start(); // e.g. 110|0|000
@@ -240,14 +246,15 @@ void RoutingTable::split_bucket(KBucket bucket, int depth) {
         }
     }
 
-    auto it = std::ranges::find(std::as_const(bucket_list), bucket);
-    if (it == bucket_list.cend()) {
+    auto it = std::ranges::find(bucket_list, bucket);
+    if (it == bucket_list.end()) {
         std::cerr << "Provided a bucket not in the bucket list" << std::endl;
         return;
     } else {
+        auto index = std::distance(bucket_list.begin(), it);
         bucket_list.erase(it);
-        bucket_list.insert(it, second);
-        bucket_list.insert(it, first);
+        bucket_list.insert(bucket_list.begin() + index, second);
+        bucket_list.insert(bucket_list.begin() + index, first);
     }
 }
 
@@ -273,6 +280,7 @@ void RoutingTable::try_add_peer(const Node& peer) {
         if ((bucket.get_start() <= this->local_node.id && this->local_node.id <= bucket.get_end())
             || depth % 5 == 0) {
             split_bucket(bucket, depth);
+            try_add_peer(peer);
         }
     }
 }
@@ -285,7 +293,8 @@ const std::vector<KBucket>& RoutingTable::get_bucket_list() const {
     return this->bucket_list;
 }
 
-NodeID generate_random_nodeID(NodeID nodeID1, NodeID nodeID2) { // weirdest function I've ever written
+// TODO rewrite if time
+NodeID generate_random_nodeID(NodeID nodeID1, NodeID nodeID2) {
     if (nodeID1 > nodeID2) {
         return {};
     }
