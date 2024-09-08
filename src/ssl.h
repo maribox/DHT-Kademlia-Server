@@ -69,6 +69,9 @@ struct fmt::formatter<SSLStatus> : fmt::formatter<std::string_view> {
     auto format(const SSLStatus& status, FormatContext &ctx) const {
         std::string_view name = "unknown";
         switch (status) {
+            case TCP_PENDING:
+                name = "TCP_PENDING";
+            break;
             case HANDSHAKE_SERVER_WRITE_CERT:
                 name = "HANDSHAKE_SERVER_WRITE_CERT";
             break;

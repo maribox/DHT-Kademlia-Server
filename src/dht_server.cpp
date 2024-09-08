@@ -1044,7 +1044,7 @@ HandleResult handle_P2P_request(int epollfd, socket_t socketfd, const u_short bo
             case DHT_RPC_STORE:
                 return handle_DHT_RPC_store(epollfd, socketfd, body_size);
             case DHT_RPC_FIND_NODE:
-                return handle_DHT_RPC_find_node(socketfd, body_size);
+                return handle_DHT_RPC_find_node(epollfd,socketfd, body_size);
             case DHT_RPC_FIND_VALUE:
                 return handle_DHT_RPC_find_value(epollfd, socketfd, body_size);
             case DHT_RPC_PING_REPLY:
@@ -1136,7 +1136,7 @@ ProcessingStatus try_processing(int epollfd, socket_t curfd){
         case INVALID_P2P_REQUEST:
             logTrace("Processed invalid message");
             forge_DHT_error(curfd, epollfd, DHT_BAD_REQUEST);
-        return PROCESSED;
+            return PROCESSED;
         case FATAL_HANDLE_ERROR:
             logTrace("Processed message with fatal error");
             return PROCESSING_ERROR;
@@ -1315,8 +1315,6 @@ bool connect_to_network(int epollfd, struct in6_addr peer_address, u_short peer_
         return false;
     }
 
-    connection_map[peer_socketfd] = {ConnectionType::P2P};
-
     Request request {};
     request.node_refresh_status = NodeRefreshStatus::AWAITING_FIRST_REPLY;
 
@@ -1355,23 +1353,24 @@ std::optional<std::shared_ptr<spdlog::logger>> setup_Logger(spdlog::level::level
 //New functions for server-sided state machine progress (automaton logic)
 
 //TCP Handshake only, returns socket and ConnectionInfo filled with metadata.
-std::pair<socket_t, ConnectionInfo&> accept_connection(const epoll_event& current_event, ConnectionType connection_type)
+std::pair<socket_t, ConnectionInfo> accept_connection(const epoll_event& current_event, ConnectionType connection_type)
 {
     sockaddr_in6 client_addr{};
     socklen_t client_addr_len = sizeof(client_addr);
-    ConnectionInfo connection_info{};
+    std::pair<socket_t, ConnectionInfo> ret_val {};
+    auto& [socketfd, connection_info] = ret_val;
 
-    socket_t socketfd = accept4(current_event.data.fd, reinterpret_cast<sockaddr*>(&client_addr),
+    socketfd = accept4(current_event.data.fd, reinterpret_cast<sockaddr*>(&client_addr),
                                 &client_addr_len, SOCK_NONBLOCK);
     //TODO: Debug if this works:
     if (socketfd == -1)
     {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
         {
-            return {socketfd, connection_info};
+            return ret_val;
         }
         logError("accept_connection: Error on TCP accept(), not EAGAIN or EWOULDBLOCK.");
-        return {-1,connection_info};
+        return ret_val;
     }
 
     u_short client_port = ntohs(client_addr.sin6_port);
@@ -1382,19 +1381,20 @@ std::pair<socket_t, ConnectionInfo&> accept_connection(const epoll_event& curren
 
     logDebug("Accepted socket connection from {}:{}", ip_to_string(client_addr.sin6_addr), client_port);
 
-    return {socketfd, connection_info};
+    return ret_val;
 }
 
 
-std::pair<socket_t, ConnectionInfo&> connect_connection(const in6_addr& address, u_int16_t port,
+std::pair<socket_t, ConnectionInfo> connect_connection(const in6_addr& address, u_int16_t port,
                                                         const ConnectionType connection_type)
 {
-    ConnectionInfo connection_info{};
-    socket_t peer_socketfd = socket(AF_INET6, SOCK_STREAM | O_NONBLOCK, 0);
+    std::pair<socket_t, ConnectionInfo> ret_val{};
+    auto &[peer_socketfd, connection_info] = ret_val;
+    peer_socketfd = socket(AF_INET6, SOCK_STREAM | O_NONBLOCK, 0);
     if (peer_socketfd == -1)
     {
         logError("connect_connection: Failed to create client socket on port {}.", port);
-        return {-1, connection_info};
+        return ret_val;
     }
 
     sockaddr_in6 addr{};
@@ -1414,18 +1414,17 @@ std::pair<socket_t, ConnectionInfo&> connect_connection(const in6_addr& address,
     logTrace("connect_connection: connect() call...", port);
     if (connect(peer_socketfd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == -1)
     {
-        if (errno == EAGAIN)
+        if (errno == EAGAIN || errno == EINPROGRESS)
         {
             //No problem, we stay in TCP_PENDING and finish the handshake later (EPOLL)
-            return {peer_socketfd, connection_info};
+            return ret_val;
         }
         logError("connect_connection: Nonblocking connect to {}:{} failed fatally. Errno: {}", ip_to_string(address),
                  port, strerror(errno));
-        close(peer_socketfd);
-        return {-1, connection_info};
+        return ret_val;
     }
     connection_info.ssl_stat = HANDSHAKE_CLIENT_READ_CERT;
-    return {peer_socketfd, connection_info};
+    return ret_val;
 }
 
 SSL* setup_SSL_for_connection(socket_t socketfd, bool am_i_server)
@@ -1676,17 +1675,16 @@ CertificateStatus receive_certificate_as_client_New(socket_t peer_socketfd, Conn
     }
     unsigned char * foreign_cert_str = nullptr;
     uint32_t cert_len{0};
-    bool socket_still_alive = receive_prefixed_sendbuf_in_charptr_New(peer_socketfd, connection_info_emplaced, foreign_cert_str, cert_len);
+    PrefixedReceiveResult recv_result = receive_prefixed_sendbuf_in_charptr_New(peer_socketfd, connection_info_emplaced, foreign_cert_str, cert_len);
 
-    if(!foreign_cert_str && socket_still_alive){
-        return CertificateStatus::CERTIFICATE_NOT_FULLY_PRESENT;
-    }
-
-    if(!socket_still_alive){
-        free(foreign_cert_str);
+    if(recv_result == RECEIVE_FATAL){
+        logTrace("received_certificate_as_client: socket is not alive anymore");
         return CertificateStatus::ERRORED_CERTIFICATE;
     }
 
+    if(recv_result == RECEIVE_AGAIN){
+        return CertificateStatus::CERTIFICATE_NOT_FULLY_PRESENT;
+    }
 
     X509 * foreign_certificate = SSLUtils::load_cert_from_char(foreign_cert_str,cert_len);
     free(foreign_cert_str);
@@ -1760,36 +1758,40 @@ socket_t init_tcp_connect_ssl(int epollfd, const in6_addr& address, u_int16_t po
 {
     logTrace("init_tcp_connect_ssl called.");
     auto [socketfd,connection_info] = connect_connection(address, port, connection_type);
-
+    if(socketfd == -1){
+        return -1;
+    }
     //TODO, maybe move this to the next connect function in line.
     SSL* ssl = setup_SSL_for_connection(socketfd,false);
     connection_info.ssl = ssl;
 
-    connection_map[socketfd] = connection_info;
+    connection_map.emplace(socketfd,std::move(connection_info));
     logTrace("init_tcp_connect_ssl: added newly connecting peer to global connection_map.");
     // TODO potentially treat -1
     add_to_epoll(epollfd,socketfd);
     return socketfd;
 }
 
-bool retry_tcp_connect_ssl(socket_t socketfd, ConnectionInfo connection_info)
+bool probe_tcp_connect_ssl(socket_t socketfd, ConnectionInfo &connection_info)
 {
-    sockaddr_in6 addr{};
-    addr.sin6_family = AF_INET6;
-    addr.sin6_port = htons(connection_info.client_port);
-    addr.sin6_addr = connection_info.client_addr;
+    logTrace("probe_tcp_connect_ssl: connect() probe", connection_info.client_port);
 
-    logTrace("retry_tcp_connect_ssl: connect() call...", connection_info.client_port);
-    if (connect(socketfd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == -1) {
-        if(errno == EAGAIN)
-        {
-            //No problem, we stay in TCP_PENDING and finish the handshake later (EPOLL)
-            return true;
-        }
-        logError("retry_tcp_connect_ssl: Nonblocking connect to {}:{} failed fatally. Errno: {}", ip_to_string(addr.sin6_addr), connection_info.client_port, strerror(errno));
-        close(socketfd);
+    int error = 0;
+    socklen_t len = sizeof(error);
+
+    // Get the socket error
+    if (getsockopt(socketfd, SOL_SOCKET, SO_ERROR, &error, &len) != 0) {
+        logError("probe_tcp_connect_ssl: Failed to get socket error: {}", strerror(errno));
         return false;
     }
+    if(error != 0){
+        if(error == EINPROGRESS || error == EAGAIN){
+            return true;
+        }
+        logError("probe_tcp_connect_ssl: Nonblocking connect to {}:{} failed fatally. getsockopt Error: {}", ip_to_string(connection_info.client_addr), connection_info.client_port, error);
+        return false;
+    }
+    logTrace("probe_tcp_connect_ssl: probing was successfull. TCP connected");
     connection_info.ssl_stat = HANDSHAKE_CLIENT_READ_CERT; //Let EPOLLIN notify us next :)
     return true;
 }
@@ -1827,38 +1829,46 @@ bool init_connect_ssl(socket_t socketfd, ConnectionInfo &connection_info)
 
 bool init_accept_ssl(int epollfd, const epoll_event& current_event, ConnectionType connection_type)
 {
-    logTrace("fully_accept called.");
+    logTrace("init_accept_ssl: called.");
     auto [socketfd,connection_info] = accept_connection(current_event, ConnectionType::P2P);
     SSL* ssl = setup_SSL_for_connection(socketfd, true);
     connection_info.ssl = ssl;
     connection_info.ssl_stat = SSLStatus::HANDSHAKE_SERVER_WRITE_CERT;
     connection_map.emplace(socketfd, connection_info);
     //Provide certificate to requesting peer
+
     write_charptr_to_sendbuf(connection_info, SSLConfig::length_prefixed_cert_str, sizeof(uint32_t) + SSLConfig::cert_len);
     FlushResult flushRes = flush_sendbuf_New(socketfd,connection_info);
     //Advance SSL state depending on the flush-out result
     if(flushRes == FLUSH_FATAL){
         return false;
     }
+    logTrace("init_accept_ssl: Sent the certificate (at least partially)");
 
     add_to_epoll(epollfd,socketfd);
     //TODO: epoll_ctl could return -1, errno set.
 
     if(flushRes == FLUSH_AGAIN)
     {
+        logTrace("init_accept_ssl: Only partially flushed the certificate.");
         //EPOLLOUT will notify us
         return true;
     }
     //EVERYTHING_FLUSHED:
     SSLStatus tried_accept = SSLUtils::try_ssl_accept(ssl);
+
+    if(tried_accept == PENDING_ACCEPT_READ){
+        tried_accept = SSLUtils::try_ssl_accept(ssl);
+    }
     connection_map.at(socketfd).ssl_stat = tried_accept;
+
     if(tried_accept == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
         logError("init_accept_ssl: Fatal error occurred on SSL accept. TCP connection was closed.");
         return false;
     }
     //SSL Connection setup (put certificate in sendbuffer and flush once)
     //Further, use EPOLLET for callback when (partial) rest of message can be sent
-    logDebug("init_accept_ssl: Accepted new connection on listening P2P socket");
+    logDebug("init_accept_ssl: Accepted new connection on listening P2P socket. SSLStatus: {}", tried_accept);
     return true;
 }
 
@@ -1879,24 +1889,25 @@ bool handle_protocol(socket_t socketfd, ConnectionInfo& connection_info)
         return true;
     }
 
-    defer logHandleExit{[&] { logTrace("handle_protocol: left. ---------------------------"); }};
+    defer logHandleExit{[&] { logTrace("----- handle_protocol: left. SSLStatus: {}-----", connection_info.ssl_stat); }};
     if (connection_info.role == ConnectionRole::SERVER)
     {
-        logTrace("handle_protocol: SERVER entered.---------------------------");
+        FlushResult flush_result = FLUSHED_EVERYTHING;
+        logTrace("-----handle_protocol: SERVER entered. SSLStatus: {}-----", connection_info.ssl_stat);
         switch (connection_info.ssl_stat)
         {
         //Server still needs to finish SSL handshake for the next few cases:
 
         case SSLStatus::HANDSHAKE_SERVER_WRITE_CERT:
             //length prefixed ssl certificate is buffered since init_accept_ssl. Simply flush it
-            FlushResult flushRes = flush_sendbuf_New(socketfd, connection_info);
-            if (flushRes == FLUSH_FATAL)
+             flush_result = flush_sendbuf_New(socketfd, connection_info);
+            if (flush_result == FLUSH_FATAL)
             {
                 //Connection got torn down due to error(s) on certificate transmission. Abort accepting.
                 logTrace( "handle_protocol: error on certificate sending.");
                 return false;
             }
-            if (flushRes == FLUSHED_EVERYTHING)
+            if (flush_result == FLUSHED_EVERYTHING)
             {
                 connection_info.ssl_stat = SSLUtils::try_ssl_accept(connection_info.ssl);
                 if (connection_info.ssl_stat == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT)
@@ -1928,12 +1939,12 @@ bool handle_protocol(socket_t socketfd, ConnectionInfo& connection_info)
     }
     else
     {
-        logTrace("handle_protocol: CLIENT entered.---------------------------");
+        logTrace("----- handle_protocol: CLIENT entered {}.-----", connection_info.ssl_stat);
         switch (connection_info.ssl_stat)
         {
         //Client still needs to finish TCP or SSL handshake for the next few cases
         case SSLStatus::TCP_PENDING:
-            return retry_tcp_connect_ssl(socketfd, connection_info);
+            return probe_tcp_connect_ssl(socketfd, connection_info);
         case SSLStatus::HANDSHAKE_CLIENT_READ_CERT:
             return init_connect_ssl(socketfd, connection_info);
         case SSLStatus::PENDING_CONNECT_READ:
@@ -1957,7 +1968,8 @@ bool handle_protocol(socket_t socketfd, ConnectionInfo& connection_info)
 
 bool handle_EPOLLIN_event(int epollfd, socket_t socketfd, ConnectionInfo &connection_info)
 {
-    defer left_epollin {[&] {logTrace("handle_EPOLLIN_event: left.");}};
+    logTrace("====handle_EPOLLIN_event: entered {}====", connection_info.ssl_stat);
+    defer left_epollin {[&] {logTrace("====handle_EPOLLIN_event: left.====");}};
 
     //1. Lookup all metadata for switch metadata.state
     //2. Flush read everything as user data (connectionInfo (for ssl encrypted or not)).
@@ -2013,7 +2025,8 @@ bool handle_EPOLLIN_event(int epollfd, socket_t socketfd, ConnectionInfo &connec
 
 bool handle_EPOLLOUT_event(int epollfd, socket_t socketfd, ConnectionInfo &connection_info)
 {
-    defer left_epollout {[&] {logTrace("handle_EPOLLOUT_event: left.");}};
+    logTrace("====handle_EPOLLOUT_event: entered. SSLState: {}====", connection_info.ssl_stat);
+    defer left_epollout {[&] {logTrace("====handle_EPOLLOUT_event: left.====");}};
     if(!handle_protocol(socketfd, connection_info))
     {
         logError("handle_EPOLLOUT_event: Initial protocol was not adhered to. Error.");
@@ -2040,7 +2053,7 @@ int main(int argc, char const* argv[])
      * 3. to join existing network: pass peer ip and port for p2p contact point
     */
     //Setup logger:
-    auto loglevel = spdlog::level::info;
+    auto loglevel = spdlog::level::trace;
     auto loggerOpt = setup_Logger(loglevel);
     if (!loggerOpt.has_value())
     {
@@ -2272,9 +2285,14 @@ int main(int argc, char const* argv[])
             if (current_event.events & EPOLLERR)
             {
                 //TODO: Master, Check for if socket is MOUDLE_API or P2P, fatal error, shut down everything
+                auto erroredfd = current_event.data.fd;
+                if(erroredfd == module_api_socketfd || erroredfd == p2p_socketfd){
+                    sig_c_handler(SIGTERM);
+                }
+
                 tear_down_connection(epollfd, current_event.data.fd);
                 logTrace("New EPOLLERR event, tore down connection");
-                continue;
+
             }
             //Accepting new connections:
             if (current_event.data.fd == module_api_socketfd /*TODO: Only listen for ports after init phase*/)
@@ -2296,6 +2314,7 @@ int main(int argc, char const* argv[])
                 //TCP Handshake only
                 if(!init_accept_ssl(epollfd, current_event, ConnectionType::P2P))
                 {
+                    //TODO: tear_down_connection
                     logDebug("Failed to accept new connection from P2P socket");
                 }
             }
@@ -2303,7 +2322,7 @@ int main(int argc, char const* argv[])
             //Handling existing connections:
             else
             {
-                bool socket_still_valid = true;
+                bool socket_still_valid;
 
                 if (!connection_map.contains(current_event.data.fd))
                 {
@@ -2312,6 +2331,18 @@ int main(int argc, char const* argv[])
                     continue;
                 }
                 // handle client processing of existing sessions
+
+                if (current_event.events & EPOLLOUT)
+                {
+                    socket_still_valid = handle_EPOLLOUT_event(epollfd,current_event.data.fd,
+                                                                connection_map.at(current_event.data.fd));
+                    if(!socket_still_valid)
+                    {
+                        tear_down_connection(epollfd,current_event.data.fd);
+                        continue;
+                    }
+                }
+
                 if (current_event.events & EPOLLIN)
                 {
                     logTrace("New EPOLLIN event.");
@@ -2323,15 +2354,7 @@ int main(int argc, char const* argv[])
                         continue;
                     }
                 }
-                if (current_event.events & EPOLLOUT)
-                {
-                    socket_still_valid = handle_EPOLLOUT_event(epollfd,current_event.data.fd,
-                                                                connection_map.at(current_event.data.fd));
-                    if(!socket_still_valid)
-                    {
-                        tear_down_connection(epollfd,current_event.data.fd);
-                    }
-                }
+
             }
         }
 

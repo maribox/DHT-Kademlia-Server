@@ -735,10 +735,9 @@ SSLStatus SSLUtils::try_ssl_accept(SSL* ssl){
         if (ssl_error == SSL_ERROR_WANT_WRITE) {
             return SSLStatus::PENDING_ACCEPT_WRITE;
         }
-        logError("Had Error on SSL ACCEPT: {}", ssl_error);
+        logError("try_ssl_accept: Had Error on SSL ACCEPT: {}", ssl_error);
         custom_error_investigation();
         //dump_x509_store(SSL_get_SSL_CTX(ssl));
-
 
         return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
     }
@@ -756,7 +755,7 @@ SSLStatus SSLUtils::try_ssl_connect(SSL* ssl){
         if (ssl_error == SSL_ERROR_WANT_WRITE) {
             return SSLStatus::PENDING_CONNECT_WRITE;
         }
-        logError("Had Error on SSL CONNECT: {}", ssl_error);
+        logError("try_ssl_connect: Had Error on SSL CONNECT: {}", ssl_error);
         custom_error_investigation();
         //dump_x509_store(SSL_get_SSL_CTX(ssl));
         return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;

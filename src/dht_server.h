@@ -295,7 +295,7 @@ socket_t init_tcp_connect_ssl(int epollfd, const in6_addr& address, u_int16_t po
 /*
  * Client Callstack for ssl_connect to new connection:
  * init_tcp_connect_ssl -> TCP_PENDING
- * TCP_PENDING -> retry_tcp_connect_ssl -> HANDSHAKE_CLIENT_READ_CERT
+ * TCP_PENDING -> probe_tcp_connect_ssl -> HANDSHAKE_CLIENT_READ_CERT
  * HANDSHAKE_CLIENT_READ_CERT -> init_connect_ssl -> PENDING_CONNECT_READ/WRITE
  * PENDING_CONNECT_READ/WRITE -> try_ssl_connect  -> try_ssl_connect -> ... -> try_ssl_connect -> CONNECTED
  */
