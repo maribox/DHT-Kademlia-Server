@@ -203,38 +203,41 @@ void purge_local_storage(std::chrono::seconds sleep_period){
 
 
 // SSL
-// TODO revise
 void tear_down_connection(int epollfd, socket_t socketfd, bool expected = true){
-    logDebug("Tearing down connection.");
+    //is well-defined on sockets which are not contained in the epoll watch-set.
+    logDebug("Tearing down connection, this was {}", expected ? "true":"false");
+    epoll_ctl(epollfd, EPOLL_CTL_DEL, socketfd, 0);
+
     if(connection_map.contains(socketfd)){
         ConnectionInfo connection_info = connection_map.at(socketfd);
         //Module API socket (to client).
-        if(connection_info.connection_type == ConnectionType::MODULE_API){
-            close(socketfd);
-            return;
+        if(connection_info.connection_type == ConnectionType::P2P){
+            if(SSLUtils::isAliveSSL(connection_info.ssl_stat)){
+                //SSL connection is up. Shut it down.
+                SSL_shutdown(connection_info.ssl);
+            }
+            //Free ssl object of the connection.
+            SSL_free(connection_info.ssl);
         }
-        //Else: P2P Connection Type.
-        if(SSLUtils::isAliveSSL(connection_info.ssl_stat)){
-           //SSL connection is up. Shut it down.
-           SSL_shutdown(connection_info.ssl);
-        }
-        //Free ssl object of the connection.
-        SSL_free(connection_info.ssl);
-        //SSL objects all freed. Proceed with lower layer freeing.
-        close(socketfd);
-        connection_map.erase(socketfd);
-
-        epoll_ctl(epollfd,EPOLL_CTL_DEL,socketfd,nullptr);
-
         logDebug("Tore down connection running over port: {}.", connection_info.client_port);
+        connection_map.erase(socketfd);
+    }
 
-    }else{
-        //Should be a dead branch:
-        //TODO: Investigate
-        logDebug("tear_down_connection: tore down connection which was not yet contained in the connection_map");
+    //TODO @Marius: Also remove request_map entries if contained
+    if(request_map.contains(socketfd)){
+        //TODO: @Marius Do all internal cleanup logic. If only primitive types and std::containers, nothing to be done
+        // except if the containers contain actual pointers that were malloc-ed. Then explicitly free.
+        request_map.erase(socketfd);
+    }
+
+    int error;
+    socklen_t error_size = sizeof(error);
+    getsockopt(socketfd, SOL_SOCKET, SO_ERROR, &error, &error_size);
+    if(error == 0){
         close(socketfd);
     }
 }
+
 
 // Storage
 
@@ -1187,22 +1190,14 @@ socket_t setup_server_socket(u_short port) {
 }
 
 //SSL functions:
-void prepare_SSL_Config(/*in_port_t host_p2p_port*/){
+void prepare_SSL_Config(){
 
     SSLConfig::id = routing_table.get_local_node().id;
-
-    /*
-    //Create certificate map file. File name is "cert_map_s_<P2PPort>.txt".
-    //This way, no race condition to file names, as the ports are unique.
-    std::string port_string = std::to_string(host_p2p_port);
-    SSLConfig::certmap_filename = "cert_map_s_" + port_string + ".txt";
-    SSLConfig::cert_map = CertUtils::load_certificate_map(SSLConfig::certmap_filename);*/
 
     //1. Init SSL library
     SSL_library_init();
     OpenSSL_add_ssl_algorithms();
     SSL_load_error_strings();
-
 
     //Generate Key-pair for signing certificates and DHKE
     SSLConfig::pkey = KeyUtils::generate_rsa_key();
@@ -1247,17 +1242,6 @@ void prepare_SSL_Config(/*in_port_t host_p2p_port*/){
     BIO_read(bio, SSLConfig::length_prefixed_cert_str + sizeof(net_length), SSLConfig::cert_len);
     BIO_free(bio);
 
-    /*TODO: @Marius, still necessary to save everything persistently? We could also just keep them in variables
-     * (as done currently). Saving to file only serves redundancy (e.g. post-crash/-exit private key recovery).
-    */
-
-    // Save the private key and certificate to files
-    /*
-    KeyUtils::save_private_key(SSLConfig::pkey, "private_key_" + port_string + ".pem");
-    KeyUtils::save_public_key(SSLConfig::pkey, "public_key_" + port_string + ".pem"); //Optional, could be derived
-    CertUtils::save_certificate(SSLConfig::cert, "certificate_" + port_string + ".pem");
-    */
-
     //Setup SSL context (globally)
     SSLConfig::server_ctx = SSLUtils::create_context(true);
     SSL_CTX_use_certificate(SSLConfig::server_ctx, SSLConfig::cert);
@@ -1278,7 +1262,14 @@ void clean_up_SSL_Config(){
 
 }
 
-//TODO: Test if purger stop works.
+void clean_up_async_task_queue(){
+    for(auto &async_task : async_tasks){
+        free(async_task.args);
+    }
+    async_tasks.clear();
+}
+
+
 void sig_c_handler(int signal){
     if(signal == SIGINT || signal == SIGTERM){
         if(purger.joinable())
@@ -1293,6 +1284,7 @@ void sig_c_handler(int signal){
             logDebug("sig_c_handler: Purger joined.");
         }
         clean_up_SSL_Config();
+        clean_up_async_task_queue();
         logDebug("sig_c_handler: Cleaned up ssl config");
         logInfo("sig_c_handler: Cleaned up ssl config");
         exit(0);
@@ -1305,7 +1297,7 @@ bool connect_to_network(int epollfd, struct in6_addr peer_address, u_short peer_
 
     socket_t peer_socketfd = init_tcp_connect_ssl(epollfd, peer_address, peer_port, ConnectionType::P2P);
     if (peer_socketfd == -1) {
-        tear_down_connection(epollfd, peer_socketfd);
+        tear_down_connection(epollfd, peer_socketfd,false);
         return false;
     }
 
@@ -1356,7 +1348,6 @@ std::pair<socket_t, ConnectionInfo> accept_connection(const epoll_event& current
 
     socketfd = accept4(current_event.data.fd, reinterpret_cast<sockaddr*>(&client_addr),
                                 &client_addr_len, SOCK_NONBLOCK);
-    //TODO: Debug if this works:
     if (socketfd == -1)
     {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -1755,12 +1746,12 @@ socket_t init_tcp_connect_ssl(int epollfd, const in6_addr& address, u_int16_t po
     if(socketfd == -1){
         return -1;
     }
-    //TODO, maybe move this to the next connect function in line.
 
     connection_map.emplace(socketfd,std::move(connection_info));
     logTrace("init_tcp_connect_ssl: added newly connecting peer to global connection_map.");
-    // TODO potentially treat -1
-    add_to_epoll(epollfd,socketfd);
+    if(add_to_epoll(epollfd,socketfd) == -1){
+        return -1;
+    }
     return socketfd;
 }
 
@@ -1821,10 +1812,11 @@ bool init_connect_ssl(socket_t socketfd, ConnectionInfo &connection_info)
     return true;
 }
 
-bool init_accept_ssl(int epollfd, const epoll_event& current_event, ConnectionType connection_type)
+bool init_accept_ssl(int epollfd, const epoll_event& current_event, socket_t &out_socketfd)
 {
     logTrace("init_accept_ssl: called.");
     auto [socketfd,connection_info] = accept_connection(current_event, ConnectionType::P2P);
+    out_socketfd = socketfd;
     SSL* ssl = setup_SSL_for_connection(socketfd, true);
     connection_info.ssl = ssl;
     connection_info.ssl_stat = SSLStatus::HANDSHAKE_SERVER_WRITE_CERT;
@@ -1839,8 +1831,9 @@ bool init_accept_ssl(int epollfd, const epoll_event& current_event, ConnectionTy
     }
     logTrace("init_accept_ssl: Sent the certificate (at least partially)");
 
-    add_to_epoll(epollfd,socketfd);
-    //TODO: epoll_ctl could return -1, errno set.
+    if(add_to_epoll(epollfd,socketfd) == -1){
+        return false;
+    }
 
     if(flushRes == FLUSH_AGAIN)
     {
@@ -2228,8 +2221,7 @@ int main(int argc, char const* argv[])
     logDebug("Setup all initial sockets, epollfds. Awaiting connections / requests");
 
     //Generate everything necessary for SSL. See ssl.cpp/ssl.h
-    //TODO: Persistent storage of certificate map necessary? I doubt it. Argument only passed for filename uniqueness.
-    prepare_SSL_Config(/*host_p2p_port*/);
+    prepare_SSL_Config();
 
     logDebug(
         "Prepared the \"SSLConfig::\" (context, self-signed certificate,...) for all future P2P-data transmissions ");
@@ -2280,13 +2272,12 @@ int main(int argc, char const* argv[])
             //Errored connections:
             if (current_event.events & EPOLLERR)
             {
-                //TODO: Master, Check for if socket is MOUDLE_API or P2P, fatal error, shut down everything
                 auto erroredfd = current_event.data.fd;
                 if(erroredfd == module_api_socketfd || erroredfd == p2p_socketfd){
                     sig_c_handler(SIGTERM);
                 }
 
-                tear_down_connection(epollfd, current_event.data.fd);
+                tear_down_connection(epollfd, current_event.data.fd,false);
                 logTrace("New EPOLLERR event, tore down connection");
 
             }
@@ -2308,9 +2299,10 @@ int main(int argc, char const* argv[])
             else if (current_event.data.fd == p2p_socketfd)
             {
                 //TCP Handshake only
-                if(!init_accept_ssl(epollfd, current_event, ConnectionType::P2P))
+                socket_t new_socket;
+                if(!init_accept_ssl(epollfd, current_event,new_socket))
                 {
-                    //TODO: tear_down_connection
+                    tear_down_connection(epollfd,new_socket,false);
                     logDebug("Failed to accept new connection from P2P socket");
                 }
             }
@@ -2334,7 +2326,7 @@ int main(int argc, char const* argv[])
                                                                 connection_map.at(current_event.data.fd));
                     if(!socket_still_valid)
                     {
-                        tear_down_connection(epollfd,current_event.data.fd);
+                        tear_down_connection(epollfd,current_event.data.fd,false);
                         continue;
                     }
                 }
@@ -2346,7 +2338,7 @@ int main(int argc, char const* argv[])
                                                                 connection_map.at(current_event.data.fd));
                     if(!socket_still_valid)
                     {
-                        tear_down_connection(epollfd,current_event.data.fd);
+                        tear_down_connection(epollfd,current_event.data.fd,false);
                         continue;
                     }
                 }
