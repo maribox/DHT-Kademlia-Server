@@ -722,6 +722,7 @@ void custom_error_investigation()
     unsigned long errorLong =  ERR_get_error();
     ERR_error_string_n(errorLong,custom_error_msg.data(),custom_error_msg.size());
     logError("SSL error investigation: {}",std::string(custom_error_msg.data()));
+    perror("SSL error investigation, errno: ");
 }
 
 SSLStatus SSLUtils::try_ssl_accept(SSL* ssl){

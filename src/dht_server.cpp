@@ -35,6 +35,8 @@ namespace SSLConfig {
     std::string certmap_filename;
 }
 
+std::vector<AsyncTask> async_tasks{};
+//Go through all, then std_erase_if()
 
 /*
 Important Remark: Maybe use a logger for keeping track of operations during runtime.
@@ -204,7 +206,7 @@ void purge_local_storage(std::chrono::seconds sleep_period){
 // SSL
 // TODO revise
 void tear_down_connection(int epollfd, socket_t socketfd, bool expected = true){
-
+    logDebug("Tearing down connection.");
     if(connection_map.contains(socketfd)){
         ConnectionInfo connection_info = connection_map.at(socketfd);
         //Module API socket (to client).
@@ -1762,8 +1764,6 @@ socket_t init_tcp_connect_ssl(int epollfd, const in6_addr& address, u_int16_t po
         return -1;
     }
     //TODO, maybe move this to the next connect function in line.
-    SSL* ssl = setup_SSL_for_connection(socketfd,false);
-    connection_info.ssl = ssl;
 
     connection_map.emplace(socketfd,std::move(connection_info));
     logTrace("init_tcp_connect_ssl: added newly connecting peer to global connection_map.");
@@ -1802,7 +1802,6 @@ bool probe_tcp_connect_ssl(socket_t socketfd, ConnectionInfo &connection_info)
 //MANDATORY: ssl_stat must be transitioned to SSLStatus::HANDSHAKE_CLIENT_READ_CERT before calling this function
 bool init_connect_ssl(socket_t socketfd, ConnectionInfo &connection_info)
 {
-    SSL *ssl = connection_info.ssl;
     CertificateStatus cert_stat = receive_certificate_as_client_New(socketfd, connection_info);
     if(cert_stat == CertificateStatus::ERRORED_CERTIFICATE || cert_stat == CertificateStatus::KNOWN_CERTIFICATE_CONTENT_MISMATCH){
         //Abort the connection. Could be a malicious Peer! Abort, abort!
@@ -1813,6 +1812,9 @@ bool init_connect_ssl(socket_t socketfd, ConnectionInfo &connection_info)
         logTrace("init_connect_ssl: Received certificate is not fully present yet. Wait for more bytes.");
         return true; //fd is valid, but wait for more bytes.
     }
+
+    SSL* ssl = setup_SSL_for_connection(socketfd,false);
+    connection_info.ssl = ssl;
     logTrace("init_connect_ssl: Received certificate is in a valid state. Now, try_ssl_connect()");
     //Else: cert_stat is either NEW_VALID_CERTIFICATE  or EXPECTED_CERTIFICATE, continue with protocol.
     //New certificate saved or recognized previously trusted certificate.
@@ -1857,9 +1859,6 @@ bool init_accept_ssl(int epollfd, const epoll_event& current_event, ConnectionTy
     //EVERYTHING_FLUSHED:
     SSLStatus tried_accept = SSLUtils::try_ssl_accept(ssl);
 
-    if(tried_accept == PENDING_ACCEPT_READ){
-        tried_accept = SSLUtils::try_ssl_accept(ssl);
-    }
     connection_map.at(socketfd).ssl_stat = tried_accept;
 
     if(tried_accept == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
@@ -2031,6 +2030,10 @@ bool handle_EPOLLOUT_event(int epollfd, socket_t socketfd, ConnectionInfo &conne
     {
         logError("handle_EPOLLOUT_event: Initial protocol was not adhered to. Error.");
         return false;
+    }
+
+    if(connection_info.role == ConnectionRole::CLIENT && !SSLUtils::isAliveSSL(connection_info.ssl_stat)){
+        return true;
     }
     FlushResult flushRes = flush_sendbuf_New(socketfd,connection_info);
     if(flushRes == FLUSH_FATAL)
@@ -2258,10 +2261,11 @@ int main(int argc, char const* argv[])
 
     // event loop
     logInfo("Server running...");
+    int next_timeout = -1;
     bool server_is_running = true;
     while (server_is_running)
     {
-        int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), -1); // dangerous cast
+        int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), next_timeout); // dangerous cast
         // TODO: @Marius ADD SERVER MAINTENANCE. peer-ttl (k-bucket
         // maintenance) internal management clean up local_storage for all keys,
         // std::erase if ttl is outdated
@@ -2357,16 +2361,27 @@ int main(int argc, char const* argv[])
 
             }
         }
-
+        if(async_tasks.empty()){
+            next_timeout = -1;
+            continue; //I.e. set the timeout to infinite, as async queue is empty.
+        }
         //Do some async tasks, enqueue them as output parameter for handle functions:
+        auto now = std::chrono::system_clock::now();
+        std::chrono::duration<float,std::milli> minimum_interval {std::numeric_limits<float>::infinity()};
+        for(auto & [exec_time,func,args] : async_tasks){
+            if(exec_time < now){
+                func(args);
+                free(args); //malloc-ed in function, freed after execution.
+            }else{
+                if(minimum_interval > exec_time - now){
+                    minimum_interval = exec_time - now;
+                }
+            }
+        }
 
-        //Array of triples:
-        //timestamp now = chrono::now()
-        //for all where timestamp <= now , exec. function with args.
-        //[<timestep,std::function(function pointer), arguments>]
-        //[<timestep,function pointer, arguments>]
-        //[<timestep,function pointer, arguments>]
-        //Maybe std::variant, effectively union. Could be tricky
+        std::erase_if(async_tasks,[&](const AsyncTask &task){return task.execution_time < now;});
+        next_timeout = static_cast<int>(minimum_interval.count());
+
 
         //build minimum over all remaining tasks and define next timeout
 

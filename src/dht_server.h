@@ -89,6 +89,12 @@ enum ProcessingStatus{
     PROCESSING_ERROR = 1<<3
 };
 
+struct AsyncTask{
+    std::chrono::time_point<std::chrono::system_clock> execution_time;
+    std::function<void (void*)> func;
+    void *args;
+};
+
 namespace ServerConfig {
     static constexpr u_short MODULE_API_PORT = 7401;
     static constexpr u_short P2P_PORT = 7402;
