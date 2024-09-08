@@ -67,9 +67,16 @@ enum CertificateStatus{
 
 enum FlushResult
 {
-    EVERYTHING_WAS_FLUSHED,
+    FLUSHED_EVERYTHING,
     FLUSH_AGAIN,
     FLUSH_FATAL
+};
+
+enum PrefixedReceiveResult
+{
+    RECEIVED_EVERYTHING,
+    RECEIVE_AGAIN,
+    RECEIVE_FATAL
 };
 
 
