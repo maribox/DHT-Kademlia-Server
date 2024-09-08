@@ -669,7 +669,7 @@ bool forge_DHT_success(int epollfd, socket_t socketfd, const Key &key, const Val
 
     logTrace("Sending DHT success back");
 
-    send_DHT_message(epollfd, socketfd, message);
+    send_DHT_message(socketfd, message);
     return true;
 }
 
@@ -685,7 +685,7 @@ bool forge_DHT_failure(int epollfd, socket_t socketfd, Key &key) {
     write_body(message, 0, key.data(), KEY_SIZE);
 
     logTrace("Sending DHT failure back");
-    send_DHT_message(epollfd, socketfd, message);
+    send_DHT_message(socketfd, message);
     return true;
 }
 
@@ -709,7 +709,7 @@ void forge_DHT_RPC_ping(int epollfd, socket_t socketfd) {
     build_RPC_header(message, rpc_id);
 
     logTrace("Sending DHT RPC ping");
-    send_DHT_message(epollfd, socketfd, message);
+    send_DHT_message(socketfd, message);
 }
 
 bool handle_DHT_RPC_ping(const int epollfd, socket_t socketfd, const u_short body_size) {
@@ -729,7 +729,7 @@ bool forge_DHT_RPC_ping_reply(int epollfd, socket_t socketfd, Key rpc_id) {
     build_RPC_header(message, rpc_id);
 
     logTrace("Sending DHT RPC ping reply");
-    send_DHT_message(epollfd, socketfd, message);
+    send_DHT_message(socketfd, message);
     return true;
 }
 
@@ -759,7 +759,7 @@ bool forge_DHT_RPC_store(int epollfd, socket_t socketfd, u_short time_to_live, c
     write_body(message, RPC_SUB_HEADER_SIZE + 2 + KEY_SIZE, value.data(), value.size());
 
     logTrace("Sending DHT RPC store");
-    send_DHT_message(epollfd, socketfd, message);
+    send_DHT_message(socketfd, message);
     return true;
 }
 
@@ -805,7 +805,7 @@ bool forge_DHT_RPC_store_reply(int epollfd, socket_t socketfd, Key rpc_id, Key &
     write_body(message, RPC_SUB_HEADER_SIZE + KEY_SIZE, value.data(), value.size());
 
     logTrace("Sending DHT RPC store reply");
-    send_DHT_message(epollfd, socketfd, message);
+    send_DHT_message(socketfd, message);
     return true;
 }
 
@@ -899,7 +899,7 @@ bool forge_DHT_RPC_find_node_reply(int epollfd, socket_t socketfd, Key rpc_id, s
     }
 
     logTrace("Sending Find node reply");
-    send_DHT_message(epollfd, socketfd, message);
+    send_DHT_message(socketfd, message);
     return true;
 }
 
@@ -907,6 +907,36 @@ bool forge_DHT_RPC_find_node_reply(int epollfd, socket_t socketfd, Key rpc_id, s
 bool all_peer_request_finished(NodeLookup* node_lookup) {
     return std::ranges::all_of(node_lookup->peer_request_finished,
                                [](auto responded) { return responded.second; });
+}
+
+void start_node_refresh(int epollfd, NodeLookup* node_lookup) {
+    logTrace("handle_DHT_RPC_find_node_reply: starting node refresh");
+    for(auto& bucket : routing_table.get_bucket_list()) {
+        // send request about random key of every bucket to the closest nodes
+        Key random_key = generate_random_nodeID(bucket.get_start(), bucket.get_end());
+        for (auto& peer_node : routing_table.find_closest_nodes(random_key)) {
+            socket_t peer_socketfd = init_tcp_connect_ssl(epollfd, peer_node.addr, peer_node.port, ConnectionType::P2P);
+            tear_down_connection(epollfd, peer_socketfd);
+            // ssl init
+            dht_map[peer_socketfd] = DHTInfo {
+                {NODE_LOOKUP_FOR_NETWORK_EXPANSION},
+                {DHT_RPC_FIND_NODE_REPLY},
+                node_lookup
+            };
+            node_lookup->peer_request_finished[peer_socketfd] = false;
+            forge_DHT_RPC_find_node(peer_socketfd, random_key);
+        }
+    }
+    logTrace("handle_DHT_RPC_find_node_reply: node refresh requests all sent. Waiting for replies...");
+}
+
+void init_node_lookup(const socket_t socketfd, NodeLookup* node_lookup) {
+    node_lookup->received_nodes = std::unordered_set<Node>{K*ALPHA};
+    node_lookup->node_lookup_status = NodeLookupStatus::AWAITING_PEER_REPLIES;
+    node_lookup->known_stale_nodes = std::unordered_set<Node>{}; //based on received ones in ASYNC TIMEOUT function. remember to decrement node_count_before_refresh oÄ, think of 0 case (size_t)
+    node_lookup->peer_request_finished = std::unordered_map<socket_t, bool>{};
+    node_lookup->peer_request_finished[socketfd] = true;
+    node_lookup->node_count_before_refresh = routing_table.count();
 }
 
 bool handle_DHT_RPC_find_node_reply(int epollfd, const socket_t socketfd, const u_short body_size) {
@@ -948,12 +978,7 @@ bool handle_DHT_RPC_find_node_reply(int epollfd, const socket_t socketfd, const 
             switch(dht_info.node_lookup->node_lookup_status) {
                 case NodeLookupStatus::AWAITING_FIRST_REPLY:
                     logTrace("handle_DHT_RPC_find_node_reply: Got reply to initial FIND_NODE request. Adding new nodes to routing_table");
-                    dht_info.node_lookup->received_nodes = std::unordered_set<Node>{K*ALPHA};
-                    dht_info.node_lookup->node_lookup_status = NodeLookupStatus::AWAITING_PEER_REPLIES;
-                    dht_info.node_lookup->known_stale_nodes = std::unordered_set<Node>{}; //based on received ones in ASYNC TIMEOUT function. remember to decrement node_count_before_refresh oÄ, think of 0 case (size_t)
-                    dht_info.node_lookup->peer_request_finished = std::unordered_map<socket_t, bool>{};
-                    dht_info.node_lookup->peer_request_finished[socketfd] = true;
-                    dht_info.node_lookup->node_count_before_refresh = routing_table.count();
+                    init_node_lookup(socketfd, dht_info.node_lookup);
                     logTrace("handle_DHT_RPC_find_node_reply: routing_table currently has {} nodes before adding the ones we just got", dht_info.node_lookup->node_count_before_refresh);
                     for (auto& node : received_closest_nodes) {
                         if (!routing_table.has_same_addr_or_id(node) && node.is_valid_node()) {
@@ -961,25 +986,7 @@ bool handle_DHT_RPC_find_node_reply(int epollfd, const socket_t socketfd, const 
                             routing_table.try_add_peer(node);
                         }
                     }
-
-                    for(auto& bucket : routing_table.get_bucket_list()) {
-                        logTrace("handle_DHT_RPC_find_node_reply: starting node refresh");
-                        // send request about random key of every bucket to the closest nodes
-                        Key random_key = generate_random_nodeID(bucket.get_start(), bucket.get_end());
-                        for (auto& peer_node : routing_table.find_closest_nodes(random_key)) {
-                            socket_t peer_socketfd = init_connect_ssl(epollfd, peer_node.addr, peer_node.port, ConnectionType::P2P);
-                            tear_down_connection(epollfd, init_connect_ssl);
-                            // ssl init
-                            dht_map[peer_socketfd] = DHTInfo {
-                                        {NODE_LOOKUP_FOR_NETWORK_EXPANSION},
-                                        {DHT_RPC_FIND_NODE_REPLY},
-                                        dht_info.node_lookup
-                                    };
-                            dht_info.node_lookup->peer_request_finished[peer_socketfd] = false;
-                            forge_DHT_RPC_find_node(peer_socketfd, random_key);
-                        }
-                        logTrace("handle_DHT_RPC_find_node_reply: node refresh requests all sent. Waiting for replies...");
-                    }
+                    start_node_refresh(epollfd, dht_info.node_lookup);
                 break;
                 case NodeLookupStatus::AWAITING_PEER_REPLIES:
                     for (auto& node : received_closest_nodes) {
@@ -992,67 +999,29 @@ bool handle_DHT_RPC_find_node_reply(int epollfd, const socket_t socketfd, const 
                     // if all returned:
                     if (all_peer_request_finished(dht_info.node_lookup)) {
                         // if routing_table.count() > previous node count:
-                        if (routing_table.count() > dht_info.node_lookup->node_count_before_refresh) {
-                            // repeat procedure
-                            for(auto& bucket : routing_table.get_bucket_list()) {
-                                // start node refresh -> send request about random key of every bucket to the closest nodes
-                                Key random_key = generate_random_nodeID(bucket.get_start(), bucket.get_end());
-                                for (auto& peer_node : routing_table.find_closest_nodes(random_key)) {
-                                    socket_t peer_socketfd = init_connect_ssl(epollfd, peer_node.addr, peer_node.port, ConnectionType::P2P);
-                                    tear_down_connection(epollfd, init_connect_ssl);
-                                    // ssl init
-                                    dht_map[peer_socketfd] = DHTInfo {
-                                                        {NODE_LOOKUP_FOR_NETWORK_EXPANSION},
-                                                        {DHT_RPC_FIND_NODE_REPLY},
-                                                        dht_info.node_lookup
-                                                    };
-                                    dht_info.node_lookup->peer_request_finished[peer_socketfd] = false;
-                                    forge_DHT_RPC_find_node(peer_socketfd, random_key);
-                                }
-                            }
-                        }
-                        // else:
-                         /*
-                        bool found_new_nodes = false;
-                        new_k_closest_nodes = std::unordered_set<Node>{};
+                        if (auto new_node_count = routing_table.count() > dht_info.node_lookup->node_count_before_refresh) {
+                            logTrace("Found new nodes in last node refresh (node count has grown from {} to {}). Doing another node refresh", dht_info.node_lookup->node_count_before_refresh, new_node_count);
+                            // repeat procedure -> start new node request
+                            start_node_refresh(epollfd, dht_info.node_lookup);
+                        } else { // we have not found any new nodes in the last node refresh. We're basically done with NETWORK EXPANSION.
+                            logInfo("Network expansion finished! Successfully joined network. Found {} closest nodes", new_node_count);
 
-                        for (const auto& node : sorted_closest_nodes) {
-                            if (!protocol_map[socketfd].node_lookup->previous_k_closest_nodes.contains(node)) {
-                                found_new_nodes = true;
-                            }
-                            new_k_closest_nodes.insert(node);
-                            if (new_k_closest_nodes.size() >= number_of_nodes) {
-                                break;
-                            }
                         }
-                        protocol_map[socketfd].node_lookup->previous_k_closest_nodes = new_k_closest_nodes;
-                        if (!found_new_nodes) {
-                            break;
+                        // TODO make sure only to request closest nodes
+                        /*
+                        switch(protocol_map[socketfd].node_lookup->reason) {
+                            case NETWORK_EXPANSION:
+                                // test if we gathered more nodes than last time, if yes, repeat process
+                                // if no, say network expansion completed with x nodes and return.
+                            case STORE:
+                                // call forge_DHT_store to closest nodes
+                            case: FIND_VALUE:
+                                // call forge_DHT_find_value
                         }
-                    }
-                    if (sorted_closest_nodes.size() > number_of_nodes) {
-                        logInfo("Lookup completed. Found {} closest nodes. Resizing to {}", sorted_closest_nodes.size(), number_of_nodes);
-                        sorted_closest_nodes.resize(number_of_nodes);
-                    } else {
-                        logInfo("Lookup completed. Found {} out of {} closest nodes that were looked for.", sorted_closest_nodes.size(), number_of_nodes);
-                    }
-                    */
-                    // if we did not get any more closest nodes:
-                    /*
-                    switch(protocol_map[socketfd].node_lookup->reason) {
-                        case NETWORK_EXPANSION:
-                            // test if we gathered more nodes than last time, if yes, repeat process
-                            // if no, say network expansion completed with x nodes and return.
-                        case STORE:
-                            // call forge_DHT_store to closest nodes
-                        case: FIND_VALUE:
-                            // call forge_DHT_find_value
-                    }
-                    */
-                    }
-                    else {}
+                        */
+                    } else { // we were not the last node to reply.
 
-
+                    }
                 break;
             }
         break;
@@ -1087,7 +1056,7 @@ bool forge_DHT_RPC_find_value(int epollfd, socket_t socketfd, Key &key) {
     write_body(message, RPC_SUB_HEADER_SIZE, key.data(), KEY_SIZE);
 
     logTrace("Sending DHT RPC find value");
-    send_DHT_message(epollfd, socketfd, message);
+    send_DHT_message(socketfd, message);
     return true;
 }
 
@@ -1124,7 +1093,7 @@ bool forge_DHT_RPC_find_value_reply(int epollfd, socket_t socketfd, Key rpc_id, 
     write_body(message, RPC_SUB_HEADER_SIZE + KEY_SIZE, value.data(), value.size());
 
     logTrace("Sending DHT RPC find value reply");
-    send_DHT_message(epollfd, socketfd, message);
+    send_DHT_message(socketfd, message);
     return true;
 }
 
@@ -1159,7 +1128,7 @@ bool forge_DHT_error(int epollfd, socket_t socketfd, ErrorType error) {
     write_body(message, 0, reinterpret_cast<unsigned char*>(&network_order_error), 2);
 
     logTrace("Sending DHT error");
-    send_DHT_message(epollfd, socketfd, message);
+    send_DHT_message(socketfd, message);
     return true;
 }
 
@@ -2143,12 +2112,9 @@ bool ensure_tls_blocking(socket_t peer_socketfd, int timeout_ms) { // only to be
 bool connect_to_network(int epollfd, struct in6_addr peer_address, u_short peer_port) {
     logTrace("connect_to_network: Entered. Peer to connect to is {}:{}", ip_to_string(peer_address), peer_port);
 
-    socket_t peer_socketfd = init_connect_ssl(peer_address, peer_port);
-
+    socket_t peer_socketfd = init_tcp_connect_ssl(epollfd, peer_address, peer_port, ConnectionType::P2P);
     if (peer_socketfd == -1) {
-        return false;
-    }
-    if (add_to_epoll(epollfd, peer_socketfd) == -1) {
+        tear_down_connection(epollfd, peer_socketfd);
         return false;
     }
 
@@ -2458,7 +2424,7 @@ socket_t init_tcp_connect_ssl(int epollfd, const in6_addr& address, u_int16_t po
 
     connection_map[socketfd] = connection_info;
     logTrace("init_connect_ssl: added newly connecting peer to global connection_map.");
-
+    // TODO potentially treat -1
     add_to_epoll(epollfd,socketfd);
     return socketfd;
 }
@@ -2716,19 +2682,26 @@ int main(int argc, char const *argv[])
     std::signal(SIGTERM,sig_c_handler);
 
     // Open port for local API traffic from modules
-    socket_t module_api_socketfd = setup_server_socket(host_module_port);
-    logTrace("Setup listening module api socket");
+
     main_epollfd = epoll_create1(0);
     logTrace("Setup main epoll file descriptor");
-    main_epollfd = add_to_epoll(main_epollfd, module_api_socketfd);
-    socket_t p2p_socketfd = setup_server_socket(host_p2p_port);
-    logTrace("Setup listening p2p socket");
-    main_epollfd = add_to_epoll(main_epollfd, p2p_socketfd);
     std::vector<epoll_event> epoll_events{64};
 
+    socket_t module_api_socketfd = setup_server_socket(host_module_port);
+    logTrace("Setup listening module api socket");
+    if (add_to_epoll(main_epollfd, module_api_socketfd) == -1) {
+        logCritical("Error adding module API socket to epollfd");
+        return 1;
+    }
 
+    socket_t p2p_socketfd = setup_server_socket(host_p2p_port);
+    logTrace("Setup listening p2p socket");
+    if (add_to_epoll(main_epollfd, p2p_socketfd) == -1) {
+        logCritical("Error adding p2p socket to epollfd");
+        return 1;
+    }
 
-    if (main_epollfd == -1 || module_api_socketfd == -1 || p2p_socketfd == -1) {
+    if (module_api_socketfd == -1 || p2p_socketfd == -1) {
         logCritical("Error creating sockets");
         return 1;
     }
@@ -2742,11 +2715,10 @@ int main(int argc, char const *argv[])
     logDebug("Prepared the \"SSLConfig::\" (context, self-signed certificate,...) for all future P2P-data transmissions ");
 
     if(should_connect_to_network) {
-        // TODO joern -> epollfd und setup connect trennen, should only return socket
         if (!connect_to_network(main_epollfd, peer_address, peer_port)) {
-            return -1;
+            return 1;
         }
-    logInfo("Connection to existing network (provided peer) was successful");
+        logInfo("Connection to existing network (provided peer) was successful");
     }
     //Start to periodically purge local_storage:
 

@@ -42,8 +42,8 @@ public:
         return has_valid_id() && addr != in6addr_any && port != 0;
     }
 private:
-    bool has_valid_id() const {
-        return !std::ranges::all_of(id, [](unsigned char byte){return byte == 0;});
+    bool has_valid_id() const { // TODO Frage @master why does ranges::all_of not work here
+        return !std::all_of(id.begin(), id.end(), [](unsigned char byte){return byte == 0;});
     }
 };
 

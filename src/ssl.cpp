@@ -721,7 +721,7 @@ void custom_error_investigation()
     std::vector<char> custom_error_msg(4096);
     unsigned long errorLong =  ERR_get_error();
     ERR_error_string_n(errorLong,custom_error_msg.data(),custom_error_msg.size());
-    logError("SSL error investigation: {}",custom_error_msg);
+    logError("SSL error investigation: {}",std::string(custom_error_msg.data()));
 }
 
 SSLStatus SSLUtils::try_ssl_accept(SSL* ssl){

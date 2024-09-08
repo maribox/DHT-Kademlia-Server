@@ -1,8 +1,6 @@
 #pragma once
 
 //Library includes
-#include <optional>
-#include <map>
 #include <mutex>
 #include <string>
 #include <array>
@@ -256,6 +254,7 @@ bool handle_EPOLLOUT(int epollfd, const epoll_event &current_event);
 socket_t set_socket_blocking(socket_t peer_socket, bool blocking);
 bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms = 1000);
 
+
 int parse_commandline_args(int argc, const char* argv[]);
 
 /*
@@ -266,6 +265,7 @@ int parse_commandline_args(int argc, const char* argv[]);
  */
 
 
+socket_t init_tcp_connect_ssl(int epollfd, const in6_addr& address, u_int16_t port, ConnectionType connection_type);
 /*
  * Client Callstack for ssl_connect to new connection:
  * init_tcp_connect_ssl -> TCP_PENDING
