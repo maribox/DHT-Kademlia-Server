@@ -129,6 +129,11 @@ NodeID RoutingTable::node_distance(const NodeID& node_1, const NodeID& node_2) {
     return distance;
 }
 
+void RoutingTable::sort_by_distance_to(std::vector<Node> nodes, Key key) {
+    std::ranges::sort(nodes,[this, key](const Node& node_1, const Node& node_2)
+        {return RoutingTable::node_distance(node_1.id, key) < RoutingTable::node_distance(node_2.id, key);});
+}
+
 bool RoutingTable::has_same_addr_or_id(const Node &node) const {
     return local_node.id == node.id ||
        (local_node.addr == node.addr && local_node.port == node.port);
@@ -161,9 +166,8 @@ std::vector<Node> RoutingTable::find_closest_nodes(NodeID target_node_id) {
     }
 
     closest_nodes.push_back(local_node);
-    std::sort(closest_nodes.begin(), closest_nodes.end(),
-        [this, target_node_id](const Node& node_1, const Node& node_2){return node_distance(node_1.id, target_node_id) < node_distance(node_2.id, target_node_id);}
-    );
+
+    sort_by_distance_to(closest_nodes, target_node_id);
 
     if (closest_nodes.size() > K) {
         closest_nodes.resize(K);

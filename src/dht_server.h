@@ -135,35 +135,47 @@ struct ConnectionInfo{
 // 2. Delete all declarations that are not defined in the .cpp
 // 3. is OperationType actually needed
 //
-enum class NodeLookupStatus {
+enum class NodeRefreshStatus {
     AWAITING_FIRST_REPLY,
     AWAITING_PEER_REPLIES
 };
 
-struct NodeLookup {
-    NodeLookupStatus node_lookup_status;
+struct Request { // Requests involving NodeLookup: PUT, GET, NETWORK EXPANSION and maintenance
     std::unordered_map<socket_t, bool> peer_request_finished;   // maps sockets of peers to whether the request is finished
                                                                 // -> could be because they replied or an async function was called
-    std::unordered_set<Node> received_nodes;
     std::unordered_set<Node> known_stale_nodes;
+
+    // only defined for node refreshes ("random node lookups" in every bucket) -> network expansion and maintenance
+    NodeRefreshStatus node_refresh_status;
     size_t node_count_before_refresh;
+
+    // only defined for key - node lookup: PUT and GET
+    Key key;
+    int checked_nodes_count; // This is the number of nodes around the key wey want to look at
+    std::unordered_set<Node> previous_closest_nodes;
+
+    // only defined for PUT
+    Value value;
 };
 
 enum OperationType {
-    NODE_LOOKUP_FOR_NETWORK_EXPANSION,
+    NODE_REFRESH_FOR_NETWORK_EXPANSION,
     NODE_LOOKUP_FOR_PUT,
     NODE_LOOKUP_FOR_GET,
     // NODE_LOOKUP_FOR_NETWORK_REFRESH
+
+    FIND_VALUE,
+    STORE
 };
 
 struct DHTInfo {
     OperationType operation_type;
     P2PType expected_p2p_reply;
-    NodeLookup* node_lookup;
+    Request* request;    // shared variable among all participants of the requesting operation
 
     //Node contacted_node;
     //Node own_node;
-    Key rpc_id;
+    Key rpc_id; // TODO: deal with sending and receiving rpc id
 };
 
 

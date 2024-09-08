@@ -70,6 +70,8 @@ class RoutingTable {
     const Node& get_local_node() const;
     const std::vector<KBucket>& get_bucket_list() const;
     static NodeID node_distance(const NodeID& node_1, const NodeID& node_2);
+    static void sort_by_distance_to(std::vector<Node> nodes, Key key);
+
     bool has_same_addr_or_id(const Node &node) const;
 
     template<typename Iterable>

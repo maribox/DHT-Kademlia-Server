@@ -52,7 +52,7 @@ static constexpr size_t MIN_LIFETIME_SEC = 3*60;  //  3 minutes in seconds
 static constexpr size_t DEFAULT_LIFETIME_SEC = 5*60; // 5 minutes in seconds
 
 static constexpr size_t MAX_REPLICATION = 30;
-static constexpr size_t MIN_REPLICATION = 3;
+static constexpr size_t MIN_REPLICATION = 5; // should be bigger than ALPHA
 static constexpr size_t DEFAULT_REPLICATION = 20; // should be same to K
 
 
@@ -206,7 +206,7 @@ void purge_local_storage(std::chrono::seconds sleep_period){
 
 // SSL
 // TODO revise
-void tear_down_connection(int epollfd, socket_t socketfd){
+void tear_down_connection(int epollfd, socket_t socketfd, bool expected = true){
 
     if(connection_map.contains(socketfd)){
         ConnectionInfo connection_info = connection_map.at(socketfd);
@@ -904,39 +904,53 @@ bool forge_DHT_RPC_find_node_reply(int epollfd, socket_t socketfd, Key rpc_id, s
 }
 
 
-bool all_peer_request_finished(NodeLookup* node_lookup) {
-    return std::ranges::all_of(node_lookup->peer_request_finished,
+bool all_peer_request_finished(Request* request) {
+    return std::ranges::all_of(request->peer_request_finished,
                                [](auto responded) { return responded.second; });
 }
 
-void start_node_refresh(int epollfd, NodeLookup* node_lookup) {
-    logTrace("handle_DHT_RPC_find_node_reply: starting node refresh");
+
+void start_next_node_lookup(int epollfd, Request* request, OperationType request_type, const Key &key) {
+    for (auto& peer_node : routing_table.find_closest_nodes) {
+        socket_t peer_socketfd = init_tcp_connect_ssl(epollfd, peer_node.addr, peer_node.port, ConnectionType::P2P);
+        if (peer_socketfd == -1) {
+            logWarn("Tore down connection after socket failed to initialize");
+            tear_down_connection(epollfd, peer_socketfd, false);
+        }
+        dht_map[peer_socketfd] = DHTInfo {
+                {request_type},
+                {DHT_RPC_FIND_NODE_REPLY},
+                request
+            };
+        request->peer_request_finished[peer_socketfd] = false;
+        forge_DHT_RPC_find_node(peer_socketfd, key);
+        logTrace("start_next_node_lookup: Sent find node request as to fd {}", peer_socketfd);
+    }
+}
+
+void start_node_refresh(int epollfd, Request* request) { // TODO: currently only for NODE_LOOKUP_FOR_NETWORK_EXPANSION -> expand later for e.g. maintenance
+    logTrace("handle_DHT_RPC_find_node_reply: NodeLookup - starting node refresh");
     for(auto& bucket : routing_table.get_bucket_list()) {
         // send request about random key of every bucket to the closest nodes
         Key random_key = generate_random_nodeID(bucket.get_start(), bucket.get_end());
-        for (auto& peer_node : routing_table.find_closest_nodes(random_key)) {
-            socket_t peer_socketfd = init_tcp_connect_ssl(epollfd, peer_node.addr, peer_node.port, ConnectionType::P2P);
-            tear_down_connection(epollfd, peer_socketfd);
-            // ssl init
-            dht_map[peer_socketfd] = DHTInfo {
-                {NODE_LOOKUP_FOR_NETWORK_EXPANSION},
-                {DHT_RPC_FIND_NODE_REPLY},
-                node_lookup
-            };
-            node_lookup->peer_request_finished[peer_socketfd] = false;
-            forge_DHT_RPC_find_node(peer_socketfd, random_key);
-        }
+        start_next_node_lookup(epollfd, request, NODE_LOOKUP_FOR_PUT, random_key);
     }
-    logTrace("handle_DHT_RPC_find_node_reply: node refresh requests all sent. Waiting for replies...");
+    logTrace("handle_DHT_RPC_find_node_reply: NodeLookup - node refresh requests all sent. Waiting for replies...");
 }
 
-void init_node_lookup(const socket_t socketfd, NodeLookup* node_lookup) {
-    node_lookup->received_nodes = std::unordered_set<Node>{K*ALPHA};
-    node_lookup->node_lookup_status = NodeLookupStatus::AWAITING_PEER_REPLIES;
-    node_lookup->known_stale_nodes = std::unordered_set<Node>{}; //based on received ones in ASYNC TIMEOUT function. remember to decrement node_count_before_refresh oÄ, think of 0 case (size_t)
-    node_lookup->peer_request_finished = std::unordered_map<socket_t, bool>{};
-    node_lookup->peer_request_finished[socketfd] = true;
-    node_lookup->node_count_before_refresh = routing_table.count();
+void init_node_lookup(const socket_t socketfd, Request* request) {
+    request->node_refresh_status = NodeRefreshStatus::AWAITING_PEER_REPLIES;
+    request->known_stale_nodes = std::unordered_set<Node>{}; //based on received ones in ASYNC TIMEOUT function. remember to decrement node_count_before_refresh oÄ, think of 0 case (size_t)
+    request->peer_request_finished = std::unordered_map<socket_t, bool>{};
+}
+
+void add_new_nodes_from_node_refresh(Request* request, const std::unordered_set<Node>& received_closest_nodes) {
+    for (auto& node : received_closest_nodes) {
+        if (!routing_table.has_same_addr_or_id(node) && node.is_valid_node() &&
+            !request->known_stale_nodes.contains(node)) {
+            routing_table.try_add_peer(node);
+        }
+    }
 }
 
 bool handle_DHT_RPC_find_node_reply(int epollfd, const socket_t socketfd, const u_short body_size) {
@@ -944,7 +958,10 @@ bool handle_DHT_RPC_find_node_reply(int epollfd, const socket_t socketfd, const 
         return false;
     }
     auto& dht_info =  dht_map.at(socketfd); // TODO: segfault
-    if (dht_info.expected_p2p_reply != DHT_RPC_FIND_NODE_REPLY) {
+
+    // FIND VALUE replies are either FIND VALUE REPLY or FIND NODE REPLY, so we might be receiving a response to that
+    if (dht_info.expected_p2p_reply != DHT_RPC_FIND_NODE_REPLY &&
+        dht_info.expected_p2p_reply != DHT_RPC_FIND_VALUE_REPLY) {
         logTrace("handle_DHT_RPC_find_node_reply: received FIND NODE REPLY without request.");
         return false;
     }
@@ -973,71 +990,116 @@ bool handle_DHT_RPC_find_node_reply(int epollfd, const socket_t socketfd, const 
 
     // what definitely already happened: send find node request to contact first peer
 
+
     switch(dht_info.operation_type) {
-        case OperationType::NODE_LOOKUP_FOR_NETWORK_EXPANSION:
-            switch(dht_info.node_lookup->node_lookup_status) {
-                case NodeLookupStatus::AWAITING_FIRST_REPLY:
-                    logTrace("handle_DHT_RPC_find_node_reply: Got reply to initial FIND_NODE request. Adding new nodes to routing_table");
-                    init_node_lookup(socketfd, dht_info.node_lookup);
-                    logTrace("handle_DHT_RPC_find_node_reply: routing_table currently has {} nodes before adding the ones we just got", dht_info.node_lookup->node_count_before_refresh);
-                    for (auto& node : received_closest_nodes) {
-                        if (!routing_table.has_same_addr_or_id(node) && node.is_valid_node()) {
-                            dht_info.node_lookup->received_nodes.insert(node);
-                            routing_table.try_add_peer(node);
-                        }
-                    }
-                    start_node_refresh(epollfd, dht_info.node_lookup);
+        case OperationType::NODE_REFRESH_FOR_NETWORK_EXPANSION:
+            switch(dht_info.request->node_refresh_status) {
+                case NodeRefreshStatus::AWAITING_FIRST_REPLY:
+                    logTrace("handle_DHT_RPC_find_node_reply: Node Refresh - Got reply to initial FIND_NODE request. Tore down connection and adding new nodes to routing_table");
+                    init_node_lookup(socketfd, dht_info.request);
+                    add_new_nodes_from_node_refresh(dht_info.request, received_closest_nodes);
+
+                    dht_info.request->node_count_before_refresh = routing_table.count(); // only for node refresh
+                    logTrace("handle_DHT_RPC_find_node_reply: Starting node refresh phase in Node Refresh for Network oxpansion - routing_table currently has {} nodes", dht_info.request->node_count_before_refresh);
+                    start_node_refresh(epollfd, dht_info.request);
                 break;
-                case NodeLookupStatus::AWAITING_PEER_REPLIES:
-                    for (auto& node : received_closest_nodes) {
-                        if (!routing_table.has_same_addr_or_id(node) && node.is_valid_node() &&
-                                !dht_info.node_lookup->known_stale_nodes.contains(node)) {
-                            dht_info.node_lookup->received_nodes.insert(node);
-                            routing_table.try_add_peer(node);
-                        }
-                    }
+                case NodeRefreshStatus::AWAITING_PEER_REPLIES:
+                    logTrace("handle_DHT_RPC_find_node_reply: Node Refresh for Network expansion - Peer with fd {} replied", socketfd);
+                    dht_info.request->peer_request_finished.at(socketfd) = true;
+                    add_new_nodes_from_node_refresh(dht_info.request, received_closest_nodes);
                     // if all returned:
-                    if (all_peer_request_finished(dht_info.node_lookup)) {
+                    if (all_peer_request_finished(dht_info.request)) { // socketfd's are invalid here. Just for finding out whether all have responded
                         // if routing_table.count() > previous node count:
-                        if (auto new_node_count = routing_table.count() > dht_info.node_lookup->node_count_before_refresh) {
-                            logTrace("Found new nodes in last node refresh (node count has grown from {} to {}). Doing another node refresh", dht_info.node_lookup->node_count_before_refresh, new_node_count);
+                        if (auto new_node_count = routing_table.count() > dht_info.request->node_count_before_refresh) {
+                            logTrace("Found new nodes in last node refresh (node count has grown from {} to {}). Doing another node refresh", dht_info.request->node_count_before_refresh, new_node_count);
                             // repeat procedure -> start new node request
-                            start_node_refresh(epollfd, dht_info.node_lookup);
+                            dht_info.request->node_count_before_refresh = new_node_count;
+                            dht_info.request->peer_request_finished = std::unordered_map<socket_t, bool>{};
+                            start_node_refresh(epollfd, dht_info.request);
                         } else { // we have not found any new nodes in the last node refresh. We're basically done with NETWORK EXPANSION.
                             logInfo("Network expansion finished! Successfully joined network. Found {} closest nodes", new_node_count);
-
+                            free(dht_info.request); // TODO @ master correct here?
                         }
-                        // TODO make sure only to request closest nodes
-                        /*
-                        switch(protocol_map[socketfd].node_lookup->reason) {
-                            case NETWORK_EXPANSION:
-                                // test if we gathered more nodes than last time, if yes, repeat process
-                                // if no, say network expansion completed with x nodes and return.
-                            case STORE:
-                                // call forge_DHT_store to closest nodes
-                            case: FIND_VALUE:
-                                // call forge_DHT_find_value
-                        }
-                        */
-                    } else { // we were not the last node to reply.
-
-                    }
+                    } // else we were not the last node to reply. We don't need to do anyting else here.
                 break;
             }
         break;
+        case OperationType::NODE_LOOKUP_FOR_GET:
+            dht_info.request->checked_nodes_count = K;
+            [[fallthrough]]
+        case OperationType::NODE_LOOKUP_FOR_PUT: // if this times out, ASYNC TIMEOUT function should perform maintenance or add stale nodes to known stale nodes and try again.
+            logTrace("handle_DHT_RPC_find_node_reply: NodeLookup for PUT - Peer with fd {} replied", socketfd);
+            if(!dht_info.request->peer_request_finished.contains(socketfd)) {
+                logTrace("Got late response for Node Lookup. Returning");
+                // We "arrived late". We already had enough responses for this round of the node_lookup and deleted the rest of the sockets from our map.
+                // just return and remove the socket.
+                break;
+            }
+            dht_info.request->peer_request_finished.at(socketfd) = true;
 
+            for (auto& node : received_closest_nodes) {
+                if (dht_info.request->known_stale_nodes.contains(node)) {
+                    received_closest_nodes.erase(node);
+                }
+            }
+
+            auto key = dht_info.request->key;
+
+            // if we've received enough nodes to select the alpha closest from we can already reset and send the next round.
+            // The map will be emptied so the coming sockets know they're late.
+            if (received_closest_nodes.size() >= dht_info.request->checked_nodes_count || all_peer_request_finished(dht_info.request)) {
+                logDebug("Received enough responses in current Node Lookup round.");
+
+                std::vector<Node> received_nodes_sorted;
+                received_nodes_sorted.insert(received_nodes_sorted.end(), received_closest_nodes.begin(), received_closest_nodes.end());
+                received_nodes_sorted.insert(received_nodes_sorted.end(), dht_info.request->previous_closest_nodes.begin(), dht_info.request->previous_closest_nodes.end());
+
+                RoutingTable::sort_by_distance_to(received_nodes_sorted, key);
+
+                if (received_nodes_sorted.size() > dht_info.request->checked_nodes_count) {
+                    received_nodes_sorted.resize(dht_info.request->checked_nodes_count);
+                }
+
+                bool found_closer_nodes = false;
+                for (auto node& : received_nodes_sorted) { // go through up to 'replication' nodes
+                    if (!dht_info.request->previous_closest_nodes.contains(node)) {
+                        found_closer_nodes = true;
+                        break;
+                    }
+                }
+
+                if (found_closer_nodes) { // continue going closer to the key -> repeat process
+                    logDebug("Found closer nodes to key {}. Repeating process.", key_to_string(key));
+                    // remove all sockets from the map, including those that did not yet arrive so they later know that they're late to the party (see at start in current case).
+                    // As these sockets are not yet teared down the fd's will still be valid until they reach this case where they will just tear down the connection
+                    // and the map will thereby only contain socketfds in the current node lookup round.
+                    dht_info.request->previous_closest_nodes.clear();
+                    dht_info.request->previous_closest_nodes.insert(received_nodes_sorted.begin(), received_nodes_sorted.end());
+                    dht_info.request->peer_request_finished = std::unordered_map<socket_t, bool>{};
+                    start_next_node_lookup(epollfd, dht_info.request, dht_info.operation_type, key);
+                } else { // we are closest to the given key. Send respective requests
+                    logDebug("Found closest nodes to key {}.", key_to_string(key));
+                    //logInfo("Sending 'FIND NODE' request to closest nodes of given key {}", key_to_string(key));
+                    for (auto& peer_node : dht_info.request->previous_closest_nodes) {
+                        socket_t peer_socketfd = init_tcp_connect_ssl(epollfd, peer_node.addr, peer_node.port, ConnectionType::P2P);
+                        if (peer_socketfd == -1) {
+                            logWarn("Tore down connection after socket failed to initialize");
+                            tear_down_connection(epollfd, peer_socketfd, false);
+                        }
+                        if (dht_info.operation_type == NODE_LOOKUP_FOR_GET) {
+                            dht_map[peer_socketfd] = DHTInfo{{FIND_VALUE},{DHT_RPC_FIND_VALUE_REPLY}};
+                            forge_DHT_RPC_find_node(peer_socketfd, key);
+                        } else {
+                            dht_map[peer_socketfd] = DHTInfo{{STORE},{DHT_RPC_FIND_VALUE_REPLY}}; // responses could be: FIND NODE REPLY or STORE REPLY!
+
+                        }
+                    }
+                }
+            } // else we should wait for more nodes to reply. We don't need to do anyting else here.
+        break;
     }
-    // send out request to all the nodes that are not us/former server on our device and that are valid
 
-    // add to protocol_map[socketfd].node_lookup->returned_closest_nodes
-    // add to protocol_map[socketfd].node_lookup->responded_socketfds.push_back(socketfd)
-
-    // then, test whether all have responded yet, either here or in main by checking
-    // protocol_map[socketfd].node_lookup->responded_socketfds.size() == protocol_map[socketfd].node_lookup->requested_socketfds.size()
-    //
-
-
-
+    tear_down_connection(epollfd, socketfd, true);
     return true;
 }
 
@@ -1098,7 +1160,7 @@ bool forge_DHT_RPC_find_value_reply(int epollfd, socket_t socketfd, Key rpc_id, 
 }
 
 bool handle_DHT_RPC_find_value_reply(const socket_t socketfd, const u_short body_size) {
-    // If we don't expect this on this socketfd, protocol_map[socketfd].node_lookup == nullptr -> return false
+    // If we don't expect this on this socketfd, protocol_map[socketfd].request == nullptr -> return false
     if (body_size <= RPC_SUB_HEADER_SIZE + KEY_SIZE) {
         return false;
     }
@@ -2120,14 +2182,13 @@ bool connect_to_network(int epollfd, struct in6_addr peer_address, u_short peer_
 
     connection_map[peer_socketfd] = {ConnectionType::P2P};
 
-    NodeLookup node_lookup {
-        {NodeLookupStatus::AWAITING_FIRST_REPLY}
-    };
+    Request request {};
+    request.node_refresh_status = NodeRefreshStatus::AWAITING_FIRST_REPLY;
 
     dht_map[peer_socketfd] = DHTInfo {
-        {OperationType::NODE_LOOKUP_FOR_NETWORK_EXPANSION},
+        {OperationType::NODE_REFRESH_FOR_NETWORK_EXPANSION},
         {P2PType::DHT_RPC_FIND_VALUE_REPLY},
-        &node_lookup
+        &request
     };
 
     forge_DHT_RPC_find_node(peer_socketfd, routing_table.get_local_node().id);
