@@ -1354,7 +1354,7 @@ std::optional<std::shared_ptr<spdlog::logger>> setup_Logger(spdlog::level::level
 
 //New functions for server-sided state machine progress (automaton logic)
 
-//TCP Handshake only, returns socket and ConenctionInfo filled with metadata.
+//TCP Handshake only, returns socket and ConnectionInfo filled with metadata.
 std::pair<socket_t, ConnectionInfo&> accept_connection(const epoll_event& current_event, ConnectionType connection_type)
 {
     sockaddr_in6 client_addr{};
@@ -1370,6 +1370,8 @@ std::pair<socket_t, ConnectionInfo&> accept_connection(const epoll_event& curren
         {
             return {socketfd, connection_info};
         }
+        logError("accept_connection: Error on TCP accept(), not EAGAIN or EWOULDBLOCK.");
+        return {-1,connection_info};
     }
 
     u_short client_port = ntohs(client_addr.sin6_port);
@@ -1836,9 +1838,6 @@ bool init_accept_ssl(int epollfd, const epoll_event& current_event, ConnectionTy
     FlushResult flushRes = flush_sendbuf_New(socketfd,connection_info);
     //Advance SSL state depending on the flush-out result
     if(flushRes == FLUSH_FATAL){
-        SSL_free(ssl);
-        close(socketfd);
-        connection_map.erase(socketfd);
         return false;
     }
 
@@ -1854,15 +1853,12 @@ bool init_accept_ssl(int epollfd, const epoll_event& current_event, ConnectionTy
     SSLStatus tried_accept = SSLUtils::try_ssl_accept(ssl);
     connection_map.at(socketfd).ssl_stat = tried_accept;
     if(tried_accept == SSLStatus::FATAL_ERROR_ACCEPT_CONNECT){
-        logError("fully_accept: Fatal error occurred on SSL accept. TCP connection was closed.");
-        SSL_free(ssl);
-        close(socketfd);
-        connection_map.erase(socketfd);
+        logError("init_accept_ssl: Fatal error occurred on SSL accept. TCP connection was closed.");
         return false;
     }
     //SSL Connection setup (put certificate in sendbuffer and flush once)
     //Further, use EPOLLET for callback when (partial) rest of message can be sent
-    logDebug("fully_accept: Accepted new connection on listening P2P socket");
+    logDebug("init_accept_ssl: Accepted new connection on listening P2P socket");
     return true;
 }
 
@@ -2275,6 +2271,7 @@ int main(int argc, char const* argv[])
             //Errored connections:
             if (current_event.events & EPOLLERR)
             {
+                //TODO: Master, Check for if socket is MOUDLE_API or P2P, fatal error, shut down everything
                 tear_down_connection(epollfd, current_event.data.fd);
                 logTrace("New EPOLLERR event, tore down connection");
                 continue;
@@ -2284,14 +2281,23 @@ int main(int argc, char const* argv[])
             {
                 //TCP Handshake only
                 auto [socketfd,connection_info] = accept_connection(current_event, ConnectionType::MODULE_API);
+                if(socketfd == -1)
+                {
+                    logDebug("Failed to accept new connection from MODULE_API socket");
+                    continue;
+                }
                 //Set metadata
+
                 connection_map.emplace(socketfd, connection_info);
                 logDebug("Accepted new connection on listening MODULE_API socket");
             }
             else if (current_event.data.fd == p2p_socketfd)
             {
                 //TCP Handshake only
-                init_accept_ssl(epollfd, current_event, ConnectionType::P2P);
+                if(!init_accept_ssl(epollfd, current_event, ConnectionType::P2P))
+                {
+                    logDebug("Failed to accept new connection from P2P socket");
+                }
             }
 
             //Handling existing connections:
@@ -2314,10 +2320,10 @@ int main(int argc, char const* argv[])
                     if(!socket_still_valid)
                     {
                         tear_down_connection(epollfd,current_event.data.fd);
-
+                        continue;
                     }
                 }
-                if (socket_still_valid && current_event.events & EPOLLOUT)
+                if (current_event.events & EPOLLOUT)
                 {
                     socket_still_valid = handle_EPOLLOUT_event(epollfd,current_event.data.fd,
                                                                 connection_map.at(current_event.data.fd));
@@ -2325,11 +2331,6 @@ int main(int argc, char const* argv[])
                     {
                         tear_down_connection(epollfd,current_event.data.fd);
                     }
-                }
-                if (socket_still_valid && current_event.events & EPOLLERR)
-                {
-                    tear_down_connection(epollfd, current_event.data.fd);
-                    logTrace("New EPOLLERR event, tore down connection");
                 }
             }
         }
