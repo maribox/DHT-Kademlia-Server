@@ -51,12 +51,7 @@ enum P2PType {
     DHT_ERROR = 680
 };
 
-enum HandleResult {
-    SUCCESS_CLOSE,
-    SUCCESS_KEEP_OPEN,
-    INVALID_P2P_REQUEST,
-    FATAL_HANDLE_ERROR,
-};
+
 
 enum CertificateStatus{
     EXPECTED_CERTIFICATE = 0,
@@ -80,13 +75,23 @@ enum PrefixedReceiveResult
     RECEIVE_FATAL
 };
 
+/*
+enum ProcessingStatus {
+    SUCCESS_CLOSE,
+    SUCCESS_KEEP_OPEN,
+    INVALID_P2P_REQUEST,
+    FATAL_HANDLE_ERROR,
+};
+*/
 
 enum ProcessingStatus{
     WAIT_FOR_COMPLETE_MESSAGE_HEADER = 0,
-    WAIT_FOR_COMPLETE_MESSAGE_BODY = 1,
-    PROCESSED = 1<<1,
-    MORE_TO_READ = 1<<2,
-    PROCESSING_ERROR = 1<<3
+    WAIT_FOR_COMPLETE_MESSAGE_BODY,
+    SUCCESS_CLOSE,
+    SUCCESS_KEEP_OPEN,
+    INVALID_P2P_REQUEST,
+    MORE_TO_READ,
+    PROCESSING_ERROR,
 };
 
 struct AsyncTask{
@@ -169,16 +174,22 @@ struct Request { // Requests involving NodeLookup: PUT, GET, NETWORK EXPANSION a
     NodeRefreshStatus node_refresh_status;
     size_t node_count_before_refresh;
 
-    // only defined for key - node lookup: PUT and GET
+    // only defined for node lookup: PUT and GET
     Key key;
     int checked_nodes_count; // This is the number of nodes around the key wey want to look at
     std::unordered_set<Node> previous_closest_nodes;
 
-    // only defined for PUT
+    // only defined for PUT/STORE
     Value value;
+    int time_to_live;
+
+    // only defined for GET/FIND_VALUE
+    socket_t requested_socket;
+    std::vector<Value> received_values;
+    size_t expected_answers_count;
 };
 
-enum OperationType {
+enum RequestType {
     NODE_REFRESH_FOR_NETWORK_EXPANSION,
     NODE_LOOKUP_FOR_PUT,
     NODE_LOOKUP_FOR_GET,
@@ -188,8 +199,8 @@ enum OperationType {
     STORE
 };
 
-struct DHTInfo {
-    OperationType operation_type;
+struct RequestInfo {
+    RequestType request_type;
     P2PType expected_p2p_reply;
     Request* request;    // shared variable among all participants of the requesting operation
 
@@ -198,13 +209,11 @@ struct DHTInfo {
     Key rpc_id; // TODO: deal with sending and receiving rpc id
 };
 
-
 enum ErrorType: u_short {
     DHT_BAD_REQUEST = 10,
     DHT_NOT_FOUND = 11,
     DHT_SERVER_ERROR = 20,
 };
-
 
 
 bool operator<(const Key& lhs, const Key& rhs);
@@ -232,45 +241,45 @@ void crawl_blocking_and_store(Key &key, Value &value, int time_to_live, int repl
 void crawl_blocking_and_return(Key &key, socket_t socket);
 
 void forge_DHT_put(socket_t socket, Key& key, Value& value);
-HandleResult handle_DHT_put(socket_t socket, u_short body_size);
+ProcessingStatus handle_DHT_put(int epollfd, socket_t socket, u_short body_size);
 
 void forge_DHT_get(socket_t socket, Key& key);
-HandleResult handle_DHT_get(socket_t socket, u_short body_size);
+ProcessingStatus handle_DHT_get(int epollfd, socket_t socket, u_short body_size);
 
 void forge_DHT_success(int epollfd, socket_t socket, const Key& key, const Value& value);
-HandleResult handle_DHT_success(socket_t socket, u_short body_size);
+ProcessingStatus handle_DHT_success(socket_t socket, u_short body_size);
 
 void forge_DHT_failure(int epollfd, socket_t socket, Key& key);
-HandleResult handle_DHT_failure(socket_t socket, u_short body_size);
+ProcessingStatus handle_DHT_failure(socket_t socket, u_short body_size);
 
 void forge_DHT_RPC_ping(socket_t socket, int epollfd);
-HandleResult handle_DHT_RPC_ping(int epollfd, socket_t socket, u_short body_size);
+ProcessingStatus handle_DHT_RPC_ping(int epollfd, socket_t socket, u_short body_size);
 void forge_DHT_RPC_ping_reply(int epollfd, socket_t socket, Key rpc_id);
-HandleResult handle_DHT_RPC_ping_reply(socket_t socket, u_short body_size, std::unordered_set<socket_t>* successfully_pinged_sockets);
+ProcessingStatus handle_DHT_RPC_ping_reply(socket_t socket, u_short body_size, std::unordered_set<socket_t>* successfully_pinged_sockets);
 
-void forge_DHT_RPC_store(socket_t socket, u_short time_to_live, Key& key, Value& value);
-HandleResult handle_DHT_RPC_store(int epollfd, socket_t socket, u_short body_size);
+void forge_DHT_RPC_store(int epollfd, socket_t socketfd, u_short time_to_live, const Key &key, const Value &value);
+ProcessingStatus handle_DHT_RPC_store(int epollfd, socket_t socket, u_short body_size);
 void forge_DHT_RPC_store_reply(int epollfd, socket_t socket, Key rpc_id, Key& key, Value& value);
-HandleResult handle_DHT_RPC_store_reply(socket_t socket, u_short body_size);
+ProcessingStatus handle_DHT_RPC_store_reply(socket_t socket, u_short body_size);
 
 void forge_DHT_RPC_find_node(socket_t socket, NodeID target_node_id);
-HandleResult handle_DHT_RPC_find_node(socket_t socket, u_short body_size);
+ProcessingStatus handle_DHT_RPC_find_node(socket_t socket, u_short body_size);
 void forge_DHT_RPC_find_node_reply(int epollfd, socket_t socket, Key rpc_id, std::vector<Node> closest_nodes);
-HandleResult handle_DHT_RPC_find_node_reply(int epollfd, socket_t socket, u_short body_size);
+ProcessingStatus handle_DHT_RPC_find_node_reply(int epollfd, socket_t socket, u_short body_size);
 
-void forge_DHT_RPC_find_value(socket_t socket, Key& key);
-HandleResult handle_DHT_RPC_find_value(int epollfd, socket_t socket, u_short body_size);
+void forge_DHT_RPC_find_value(int epollfd, socket_t socket, Key& key);
+ProcessingStatus handle_DHT_RPC_find_value(int epollfd, socket_t socket, u_short body_size);
 void forge_DHT_RPC_find_value_reply(int epollfd, socket_t socket, Key rpc_id, const Key& key, const Value& value);
-HandleResult handle_DHT_RPC_find_value_reply(socket_t socket, u_short body_size, std::vector<Value>* found_values);
+ProcessingStatus handle_DHT_RPC_find_value_reply(socket_t socket, u_short body_size, std::vector<Value>* found_values);
 
 void forge_DHT_error(socket_t socket, ErrorType error);
-HandleResult handle_DHT_error(socket_t socket, u_short body_size);
+ProcessingStatus handle_DHT_error(socket_t socket, u_short body_size);
 
 bool parse_header(const ConnectionInfo &connectInfo, u_short &message_size, u_short &dht_type);
-HandleResult handle_API_request(socket_t socket, u_short body_size, ModuleApiType module_api_type);
-HandleResult handle_P2P_request(socket_t socket, u_short body_size, P2PType p2p_type);
+ProcessingStatus handle_API_request(int epollfd, socket_t socket, u_short body_size, ModuleApiType module_api_type);
+ProcessingStatus handle_P2P_request(int epollfd, socket_t socket, u_short body_size, P2PType p2p_type);
 
-ProcessingStatus try_processing(socket_t curfd);
+ProcessingStatus try_processing(int epollfd, socket_t curfd);
 
 void accept_new_connection(int epollfd, const epoll_event &cur_event, ConnectionType connection_type);
 

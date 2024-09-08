@@ -50,7 +50,7 @@ private:
 // for maps
 
 inline std::size_t hash_it(const unsigned char* data, std::size_t size, std::size_t seed) {
-    // Following 6 lines of code taken and adapted from https://stackoverflow.com/a/72073933/14236974
+    // Following 6 lines of code taken and adapted from https://stackoverflow.com/a/72073933/14236974 - Marius
     for (std::size_t i = 0; i < size; ++i) {
         unsigned char x = data[i];
         x = ((x >> 4) ^ x) * 0x45d9f3b;
