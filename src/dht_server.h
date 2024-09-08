@@ -59,7 +59,6 @@ enum CertificateStatus{
     CERTIFICATE_NOT_FULLY_PRESENT,
     KNOWN_CERTIFICATE_CONTENT_MISMATCH,
     ERRORED_CERTIFICATE,
-    
 };
 
 enum FlushResult
@@ -139,19 +138,24 @@ struct ConnectionInfo{
 // 3. is OperationType actually needed
 //
 enum class NodeLookupStatus {
-    AWAITING_FIRST_FIND_NODE_REPLY,
-    AWAITING_PEER_RESPONSES
+    AWAITING_FIRST_REPLY,
+    AWAITING_PEER_REPLIES
 };
 
 struct NodeLookup {
     NodeLookupStatus node_lookup_status;
-    std::unordered_map<socket_t, bool> peer_response_status; // maps sockets of peers to whether they have responded to our FIND NODE request
-    std::unordered_set<Node&> received_nodes;
-    std::unordered_set<Node&> known_stale_nodes;
+    std::unordered_map<socket_t, bool> peer_request_finished;   // maps sockets of peers to whether the request is finished
+                                                                // -> could be because they replied or an async function was called
+    std::unordered_set<Node> received_nodes;
+    std::unordered_set<Node> known_stale_nodes;
+    size_t node_count_before_refresh;
 };
 
-enum class OperationType {
+enum OperationType {
     NODE_LOOKUP_FOR_NETWORK_EXPANSION,
+    NODE_LOOKUP_FOR_PUT,
+    NODE_LOOKUP_FOR_GET,
+    // NODE_LOOKUP_FOR_NETWORK_REFRESH
 };
 
 struct DHTInfo {
@@ -159,7 +163,8 @@ struct DHTInfo {
     P2PType expected_p2p_reply;
     NodeLookup* node_lookup;
 
-    Node contacted_node;
+    //Node contacted_node;
+    //Node own_node;
     Key rpc_id;
 };
 
@@ -202,33 +207,33 @@ bool handle_DHT_put(socket_t socket, u_short body_size);
 bool forge_DHT_get(socket_t socket, Key& key);
 bool handle_DHT_get(socket_t socket, u_short body_size);
 
-bool forge_DHT_success(socket_t socket, int epollfd, const Key& key, const Value& value);
+bool forge_DHT_success(int epollfd, socket_t socket, const Key& key, const Value& value);
 bool handle_DHT_success(socket_t socket, u_short body_size);
 
-bool forge_DHT_failure(socket_t socket, int epollfd, Key& key);
+bool forge_DHT_failure(int epollfd, socket_t socket, Key& key);
 bool handle_DHT_failure(socket_t socket, u_short body_size);
 
-bool forge_DHT_RPC_ping(socket_t socket, int epollfd);
-bool handle_DHT_RPC_ping(socket_t socket, int epollfd, u_short body_size);
-bool forge_DHT_RPC_ping_reply(socket_t socket, int epollfd, Key rpc_id);
+void forge_DHT_RPC_ping(socket_t socket, int epollfd);
+bool handle_DHT_RPC_ping(int epollfd, socket_t socket, u_short body_size);
+bool forge_DHT_RPC_ping_reply(int epollfd, socket_t socket, Key rpc_id);
 bool handle_DHT_RPC_ping_reply(socket_t socket, u_short body_size, std::unordered_set<socket_t>* successfully_pinged_sockets);
 
-bool forge_DHT_RPC_store(socket_t socket, int epollfd, u_short time_to_live, Key& key, Value& value);
+void forge_DHT_RPC_store(socket_t socket, u_short time_to_live, Key& key, Value& value);
 bool handle_DHT_RPC_store(socket_t socket, u_short body_size);
-bool forge_DHT_RPC_store_reply(socket_t socket, int epollfd, Key rpc_id, Key& key, Value& value);
+bool forge_DHT_RPC_store_reply(int epollfd, socket_t socket, Key rpc_id, Key& key, Value& value);
 bool handle_DHT_RPC_store_reply(socket_t socket, u_short body_size);
 
-bool forge_DHT_RPC_find_node(socket_t socket, int epollfd, NodeID target_node_id);
+void forge_DHT_RPC_find_node(socket_t socket, NodeID target_node_id);
 bool handle_DHT_RPC_find_node(socket_t socket, u_short body_size);
-bool forge_DHT_RPC_find_node_reply(socket_t socket, int epollfd, Key rpc_id, std::vector<Node> closest_nodes);
-bool handle_DHT_RPC_find_node_reply(socket_t socket, u_short body_size, std::unordered_set<Node>* closest_nodes_ptr = nullptr, std::mutex* returned_nodes_mutex_ptr = nullptr);
+bool forge_DHT_RPC_find_node_reply(int epollfd, socket_t socket, Key rpc_id, std::vector<Node> closest_nodes);
+bool handle_DHT_RPC_find_node_reply(int epollfd, socket_t socket, u_short body_size);
 
-bool forge_DHT_RPC_find_value(socket_t socket, int epollfd, Key& key);
+void forge_DHT_RPC_find_value(socket_t socket, Key& key);
 bool handle_DHT_RPC_find_value(socket_t socket, u_short body_size);
-bool forge_DHT_RPC_find_value_reply(socket_t socket, int epollfd, Key rpc_id, const Key& key, const Value& value);
+bool forge_DHT_RPC_find_value_reply(int epollfd, socket_t socket, Key rpc_id, const Key& key, const Value& value);
 bool handle_DHT_RPC_find_value_reply(socket_t socket, u_short body_size, std::vector<Value>* found_values);
 
-bool forge_DHT_error(socket_t socket, int epollfd, ErrorType error);
+bool forge_DHT_error(socket_t socket, ErrorType error);
 bool handle_DHT_error(socket_t socket, u_short body_size);
 
 bool parse_header(const ConnectionInfo &connectInfo, u_short &message_size, u_short &dht_type);
@@ -238,12 +243,8 @@ bool parse_P2P_request(socket_t socket, u_short body_size, P2PType p2p_type);
 ProcessingStatus try_processing(socket_t curfd);
 
 void accept_new_connection(int epollfd, const epoll_event &cur_event, ConnectionType connection_type);
-void run_event_loop(socket_t module_api_socket, socket_t p2p_socket, int epollfd, std::vector<epoll_event>& epoll_events);
 
-
-
-int add_epoll(int epollfd, socket_t serversocket, uint32_t events);
-int mod_epoll(int epollfd, socket_t serversocket, uint32_t events);
+int add_to_epoll(int epollfd, socket_t serversocketfd);
 
 socket_t setup_server_socket(u_short port);
 socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t port, ConnectionType connection_type);

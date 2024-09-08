@@ -21,19 +21,29 @@ static constexpr size_t KEY_SIZE  = 32;
 static constexpr size_t K = 20;
 static constexpr size_t ALPHA = 3;
 
-bool operator==(const in6_addr & lhs, const in6_addr & rhs);
+inline bool operator==(const in6_addr & lhs, const in6_addr & rhs) {
+    return std::memcmp(lhs.s6_addr, rhs.s6_addr, sizeof(lhs.s6_addr)) == 0;
+}
 
 using Key = std::array<unsigned char,KEY_SIZE>;
 using Value = std::vector<unsigned char>;
 using NodeID = Key;
 
 struct Node {
+public:
     in6_addr addr;
     in_port_t port;
     NodeID id;
 
     bool operator==(const Node& other) const {
         return addr == other.addr && port == other.port && id == other.id;
+    }
+    bool is_valid_node() const {
+        return has_valid_id() && addr != in6addr_any && port != 0;
+    }
+private:
+    bool has_valid_id() const {
+        return !std::ranges::all_of(id, [](unsigned char byte){return byte == 0;});
     }
 };
 
