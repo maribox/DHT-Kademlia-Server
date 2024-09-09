@@ -210,7 +210,7 @@ void purge_local_storage(std::chrono::seconds sleep_period){
 }
 
 
-// TODO Think about forcing expected parameter
+//
 void tear_down_connection(int epollfd, socket_t socketfd, bool expected = true, bool tear_down_ssl = true){
     //is well-defined on sockets which are not contained in the epoll watch-set.
     logDebug("Tearing down connection for fd {}, this was {}", socketfd, expected ? "true":"false");
@@ -233,9 +233,9 @@ void tear_down_connection(int epollfd, socket_t socketfd, bool expected = true, 
         connection_map.erase(socketfd);
     }
 
-    //TODO @Marius: Also remove request_map entries if contained
+    //
     if(request_map.contains(socketfd)){
-        //TODO: @Marius Do all internal cleanup logic. If only primitive types and std::containers, nothing to be done
+        //
         // except if the containers contain actual pointers that were malloc-ed. Then explicitly free.
         // delete entries if socket is part of DHT Module request
         request_map.erase(socketfd);
@@ -393,7 +393,7 @@ void ensure_node_refresh_done(int epollfd, const std::shared_ptr<Request>& reque
             someone_timed_out = true;
             request->known_stale_nodes.insert(stale_node);
             routing_table.remove(stale_node);
-            // TODO somehow ensure that the node in the routing table is the current one
+            //
         }
     }
 
@@ -408,6 +408,7 @@ void ensure_node_lookup_done(int epollfd, const std::shared_ptr<Request>& reques
         if (!request->have_responded) {
             if (request_type == NODE_LOOKUP_FOR_GET) {
                 respond_to_dht_get(key, request);
+                request->have_responded = true;
             }
         }
 
@@ -422,7 +423,7 @@ void ensure_node_lookup_done(int epollfd, const std::shared_ptr<Request>& reques
             someone_timed_out = true;
             request->known_stale_nodes.insert(stale_node);
             routing_table.remove(stale_node);
-            // TODO somehow ensure that the node in the routing table is the current one
+            //
         }
     }
 
@@ -458,7 +459,7 @@ std::unordered_map<socket_t, Node> start_node_lookup(int epollfd, const std::sha
     return map_of_lookup;
 }
 
-void start_node_refresh(int epollfd, const std::shared_ptr<Request>& request) { // TODO: currently only for NODE_LOOKUP_FOR_NETWORK_EXPANSION -> expand later for e.g. maintenance
+void start_node_refresh(int epollfd, const std::shared_ptr<Request>& request) { //
     logTrace("handle_DHT_RPC_find_node_reply: NodeLookup - starting node refresh");
     std::unordered_map<socket_t, Node> map_of_refresh = {};
     for(auto& bucket : routing_table.get_bucket_list()) {
@@ -565,6 +566,8 @@ ProcessingStatus handle_DHT_get(int epollfd, socket_t socketfd, u_short body_siz
     if (opt_val) {
         request->received_values.push_back(*opt_val);
         request->expected_answers_count += 1;
+        forge_DHT_success(socketfd, key, *opt_val);
+        return SUCCESS_KEEP_OPEN;
     }
     auto map_of_lookup = start_node_lookup(epollfd, request, NODE_LOOKUP_FOR_GET, key);
     async_tasks.push_back(AsyncTask{std::chrono::system_clock::now() + std::chrono::seconds(1),
@@ -850,7 +853,7 @@ void complete_node_refresh(int epollfd, const std::shared_ptr<Request> &request)
     } else { // we have not found any new nodes in the last node refresh. We're done with NETWORK EXPANSION.
         logInfo("Network expansion finished! Successfully joined network. Found {} neighbours", new_node_count);
     }
-    // Todo: Remove task when answers are all there
+
 }
 
 void complete_node_lookup(int epollfd, const std::shared_ptr<Request> &request, RequestType request_type, Key& key) {
@@ -877,8 +880,8 @@ void complete_node_lookup(int epollfd, const std::shared_ptr<Request> &request, 
     request->completed_node_lookup = true;
     if (request->previous_closest_nodes.empty()) {
         if (request_type == NODE_LOOKUP_FOR_GET) {
+            logDebug("Previous closest nodes is empty");
             forge_DHT_failure(request->requested_socket, key);
-
         }
     } else {
         logDebug("Completed node lookup. Send requests of type {} to {} peers", (int)request_type, request->previous_closest_nodes.size());
@@ -917,7 +920,7 @@ ProcessingStatus handle_DHT_RPC_find_node_reply(int epollfd, const socket_t sock
         return INVALID_P2P_REQUEST;
     }
 
-    std::unordered_set<Node> received_closest_nodes{0}; // TODO could include us and invalid nodes
+    std::unordered_set<Node> received_closest_nodes{0}; //
 
     for (int i = 0; i < num_nodes; i++) {
         Node node{};
@@ -969,6 +972,7 @@ ProcessingStatus handle_DHT_RPC_find_node_reply(int epollfd, const socket_t sock
             if (request->completed_node_lookup && !request->have_responded) {
                 if (request_map.at(socketfd).request_type == NODE_LOOKUP_FOR_GET) {
                     respond_to_dht_get(key, request);
+                    request->have_responded = true;
                 }
                 return SUCCESS_CLOSE;
             } else if (request->completed_node_lookup && request->have_responded) {
@@ -1045,9 +1049,10 @@ ProcessingStatus handle_DHT_RPC_find_node_reply(int epollfd, const socket_t sock
         break;
         case RequestType::FIND_VALUE:
             request->expected_answers_count--;
-            if (request->received_values.size() >= request->expected_answers_count) {
+            if (request->received_values.size() >= request->expected_answers_count && !request->have_responded) {
                 logTrace("We have received enough responses for GET");
                 respond_to_dht_get(key, request);
+                request->have_responded = true;
             } else {
                 logTrace("Waiting for more answers");
             }
@@ -1096,7 +1101,7 @@ ProcessingStatus handle_DHT_RPC_find_value(int epollfd, const socket_t socketfd,
         logInfo("We have the value, so we send it back");
         forge_DHT_RPC_find_value_reply(epollfd, socketfd, rpc_id, key, *val_ptr);
     } else {
-        // TODO: handle this reply
+        //
         logInfo("We do not have the value. Sending back the closest nodes we know.");
         auto closest_nodes = routing_table.find_closest_nodes_including_us(key);
         forge_DHT_RPC_find_node_reply(epollfd, socketfd, rpc_id, closest_nodes);
@@ -1135,7 +1140,7 @@ void respond_to_dht_get(Key key, const std::shared_ptr<Request> &request) {
     }
     Value most_frequent_value = std::ranges::max_element(frequency_map, [](const auto& element1, const auto& element2){ return element1.second < element2.second; })->first;
 
-    // TODO: ensure requested socket is still the same as before! If not the request needs to be stopped, e.g. by setting requested_socket to -1
+    //
     logTrace("respond_to_dht_get: Sending success back to {}", request->requested_socket);
     forge_DHT_success(request->requested_socket, key, most_frequent_value);
 }
@@ -1171,8 +1176,9 @@ ProcessingStatus handle_DHT_RPC_find_value_reply(int epollfd, const socket_t soc
 
     request->received_values.push_back(value);
 
-    if (request->received_values.size() >= request->expected_answers_count) {
+    if (request->received_values.size() >= request->expected_answers_count && !request->have_responded) {
         respond_to_dht_get(key, request);
+        request->have_responded = true;
     } else {
         logTrace("Waiting for more answers");
     }
@@ -1293,7 +1299,7 @@ ProcessingStatus handle_P2P_request(int epollfd, socket_t socketfd, const u_shor
                 return handle_DHT_error(socketfd, body_size);
         }
     } catch (std::exception& _) {
-        forge_DHT_error(epollfd, socketfd, DHT_SERVER_ERROR); // TODO: does this still work?
+        forge_DHT_error(epollfd, socketfd, DHT_SERVER_ERROR); //
         return SUCCESS_KEEP_OPEN;
     }
     return PROCESSING_ERROR;
@@ -1920,7 +1926,7 @@ CertificateStatus receive_certificate_as_client_New(socket_t peer_socketfd, Conn
             return CertificateStatus::EXPECTED_CERTIFICATE;
         }
         //Compare yielded difference. --> RPC_Ping old connection partner
-        // TODO: Maybe leave out because of time reasons. For now, assume that peer is not reachable
+        //
         // what if old certificate owner still exists
         return CertificateStatus::KNOWN_CERTIFICATE_CONTENT_MISMATCH;
     }
@@ -2257,7 +2263,7 @@ SocketResult handle_EPOLLOUT_event(int epollfd, socket_t socketfd, ConnectionInf
     return KEEP_OPEN;
 }
 
-//
+
 
 
 #ifndef TESTING1
@@ -2389,7 +2395,8 @@ int main(int argc, char const* argv[])
         logInfo("We communicate with peers on {}:{}", host_address_string, host_p2p_port);
         if (system(("ping -c1 -s1 " + host_address_string + "  > /dev/null 2>&1").c_str()) != 0)
         {
-            logWarn("Warning: failed to ping host.");
+            // platform dependent so currently disabled
+            //logWarn("Warning: failed to ping host.");
         }
 
         if (vm.contains("peer-address") && vm.contains("peer-port"))
@@ -2403,7 +2410,8 @@ int main(int argc, char const* argv[])
             }
             if (system(("ping -c1 -s1 " + peer_address_string + "  > /dev/null 2>&1").c_str()) != 0)
             {
-                logWarn("Warning: Failed to ping peer");
+                // platform dependent so currently disabled
+                //logWarn("Warning: Failed to ping peer");
             }
         }
         else
@@ -2430,7 +2438,7 @@ int main(int argc, char const* argv[])
     }
 
 
-    // TODO:
+    //
     // switch: either
     // 1. join existing network -> we need an ip/ip list which we can ask
     // 2. create new network
@@ -2509,7 +2517,7 @@ int main(int argc, char const* argv[])
     while (server_is_running)
     {
         int event_count = epoll_wait(epollfd, epoll_events.data(), std::ssize(epoll_events), next_timeout); // dangerous cast
-        // TODO: @Marius ADD SERVER MAINTENANCE. peer-ttl (k-bucket
+        //
         // maintenance) internal management clean up local_storage for all keys,
         // std::erase if ttl is outdated
 
@@ -2541,7 +2549,7 @@ int main(int argc, char const* argv[])
                 continue;
             }
             //Accepting new connections:
-            if (current_event.data.fd == module_api_socketfd /*TODO: Only listen for ports after init phase*/)
+            if (current_event.data.fd == module_api_socketfd)
             {
                 //TCP Handshake only
                 auto [socketfd,connection_info] = accept_connection(current_event, ConnectionType::MODULE_API);

@@ -74,7 +74,6 @@ print_lock = threading.Lock()
 __dirname__ = os.path.dirname(__file__)
 opened_processes = {}
 
-
 print("----------------TESTING----------------")
 
 #-------- PARAMETER --------#

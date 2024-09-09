@@ -131,7 +131,7 @@ Set print mode to False if you want to run the tests. Else, set it to true if yo
       
 Keep in mind to set an appropriate log level in this file just below this text. If you want to run tests where many Nodes start or want to test how many nodes can start without your pc crashing (many :D, at least for us) you can also set it to off.
 
-On the first execution, this will print a few example docker commands:
+During print mode, this will print a few example docker commands:
 """)
 
 #-------- PARAMETERS --------#
@@ -142,7 +142,7 @@ base_module = 7401
 
 loglevel = "info"  # can be trace|debug|info|warn|err|critical|off
 verify_peer = False
-print_mode = False
+print_mode = True
 #--------#--------#---------#
 
 
@@ -159,6 +159,7 @@ print("#-------------TESTING--------------#")
 
 
 print("\nTEST 1 | DHT_GET: Single node should return DHT_FAILURE if value is not saved")
+time.sleep(3)
 start_network(0)
 time.sleep(2)
 s = dht_client.get_socket(host_ip, base_module)
@@ -168,6 +169,7 @@ close_all_peers()
 
 
 print("\nTEST 2 | DHT_PUT -> DHT_GET: Single node should return DHT_SUCCESS if saved value is retrieved")
+time.sleep(3)
 start_network(0)
 time.sleep(2)
 value = bytes("Landwirtschaft braucht Zeit und Platz", encoding='utf=8')
@@ -180,13 +182,15 @@ s.close()
 close_all_peers()
 
 
-print("\nTEST 3 | Create network with 5 peers without certificate validation")
-start_network(5)
+print("\nTEST 3 | Create network with 15 peers (without certificate validation) -> Look for 'Network expansion finished! Successfully joined network. Found x closest nodes'")
+time.sleep(3)
+start_network(15)
 time.sleep(10)
 close_all_peers()
 
 
 print("\nTEST 4 | Create network with 5 peers with certificate validation enforced. Bug \"SSL routines::certificate verify failed\".")
+time.sleep(3)
 verify_peer_before = verify_peer
 verify_peer = True
 start_network(5)
@@ -195,7 +199,12 @@ close_all_peers()
 verify_peer = verify_peer_before
 
 
-print("\nTest 5 | Update peer in Routingtable after another takes their IP & Port")
+print("""\nTest 5 | Update peer in Routingtable after another takes their IP & Port. 
+      Look for "Removed old node..." to see when nodes are replaced
+      """)
+
+time.sleep(3)
+
 start_network(3)
 close_peer(2)
 close_peer(1)
@@ -208,12 +217,12 @@ start_peer_container(get_ip_for_index(1), 1)
 #Restart peer 2:
 #Now node 2 should replace the old  node 3 with the new node 3 and nobody should have any old peers left
 start_peer_container(get_ip_for_index(2), 2)
-#TODO @Marius, maybe print which statement to look for if the test is successful
+
 close_all_peers()
 
 
-#TODO @Marius, revise prints errors
 print("\nTEST 6 | Random node access for set and get operations")
+time.sleep(3)
 start_network(5)
 time.sleep(2)
 random_node_ip = f"{ip_prefix}0.{random.randint(2, 6)}"

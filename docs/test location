@@ -1,0 +1,2 @@
+Some python tests are in "tests/integration/start_docker_containers.py"
+You can run the file, it will print a quick guide on how to use it.
