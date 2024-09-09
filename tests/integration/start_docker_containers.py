@@ -49,7 +49,7 @@ def start_peer_container(ip: str, i: int):
     if i > 0:
         random_peer_id = random.choice(list(added_peers.keys()))
         random_peer = added_peers[random_peer_id]
-        flags = f"-A {random_peer[0]} -P {  random_peer[1]}"
+        flags = f"-A {random_peer[0]} -P {random_peer[1]}"
     else:
         expose_ports_flags = f" -p {module_port}:{module_port} -p {p2p_port}:{p2p_port} "
         flags = ""
@@ -61,15 +61,15 @@ def start_peer_container(ip: str, i: int):
 
     if (print_mode):
         print(start_command)
-    else: 
+    else:
         start(start_command, i)
-        
+
     added_peers[i] = (ip, p2p_port)
 
 
 def start_network(n_peers):
     os.system(f"docker network inspect {network_name} > /dev/null 2>&1 || docker network create --subnet={ip_prefix}0.0/16 {network_name}")
-    
+
     start_peer_container(f"{ip_prefix}0.2", 0)
     time.sleep(0.5)
 
@@ -108,6 +108,12 @@ def random_string(length=32):
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
 
+def get_ip_for_index(i):
+    subnet = i // 253
+    ip_end = i % 253 + 2  # Keep addresses between 2 and 254
+    ip = f"{ip_prefix}{subnet}.{ip_end}"
+    return ip
+
 
 
 # GUIDE #
@@ -117,8 +123,7 @@ You can also set "print_mode" in the parameters below to True, which will only p
       
 The containers open their module ports on 'base_module' and their p2p ports on 'base_module' + 1. (Set in this file, default is 7401)
       
-Feel free to comment out the exit() statement which will build the container and stop any (!) running docker containers.
-Then it will run several tests by calling the dht_client methods.
+Set print mode to False if you want to run the tests. Else, set it to true if you only need commands to be printed and want to start the containers manually
       
 Keep in mind to set an appropriate log level in this file just below this text. If you want to run tests where many Nodes start or want to test how many nodes can start without your pc crashing (many :D, at least for us) you can also set it to off.
 
@@ -133,11 +138,12 @@ base_module = 7401
 
 loglevel = "info"  # can be trace|debug|info|warn|err|critical|off
 
-print_mode = True
+print_mode = False
 #--------#--------#---------#
 
 
 if (print_mode):
+    print("Warning, Print mode is enabled, we do not run any tests. All commands are only displayed, not run.")
     start_network(number_of_containers)
     exit()
 
@@ -148,7 +154,7 @@ os.system("docker stop $(docker ps -q)")
 print("#-------------TESTING--------------#")
 
 
-print("\nTEST 1 | Single node should return DHT_FAILURE if value is not saved")
+print("\nTEST 1 | DHT_GET: Single node should return DHT_FAILURE if value is not saved")
 start_network(0)
 time.sleep(2)
 s = dht_client.get_socket(host_ip, base_module)
@@ -156,7 +162,8 @@ dht_client.send_get(s, dht_client.dht_key)
 s.close()
 close_all_peers()
 
-print("\nTEST 2 | Single node should return DHT_SUCCESS if saved value is retrieved")
+
+print("\nTEST 2 | DHT_PUT -> DHT_GET: Single node should return DHT_SUCCESS if saved value is retrieved")
 start_network(0)
 time.sleep(2)
 value = bytes("Landwirtschaft braucht Zeit und Platz", encoding='utf=8')
@@ -174,7 +181,26 @@ start_network(5)
 time.sleep(10)
 close_all_peers()
 
-print("\nTEST 4 | Random node access for set and get operations")
+
+print("\nTest 4 | Update peer in Routingtable after another takes their IP & Port")
+start_network(3)
+close_peer(2)
+close_peer(1)
+#Now peer 0 has two dead nodes in it's routingtable
+
+#Restart peer 1:
+#This will try to contact the dead node 3 and should handle it accordingly
+start_peer_container(get_ip_for_index(1), 1)
+
+#Restart peer 2:
+#Now node 2 should replace the old  node 3 with the new node 3 and nobody should have any old peers left
+start_peer_container(get_ip_for_index(2), 2)
+#TODO @Marius, maybe print which statement to look for if the test is successful
+close_all_peers()
+
+
+#TODO @Marius, revise
+print("\nTEST 5 | Random node access for set and get operations")
 start_network(5)
 time.sleep(2)
 random_node_ip = f"{ip_prefix}0.{random.randint(2, 6)}"
@@ -187,7 +213,7 @@ dht_client.send_get(s, dht_client.dht_key)
 s.close()
 close_all_peers()
 
-print("\nTEST 5 | Stress test with 50 nodes and heavy traffic")
+print("\nTEST 6 | Stress test with 50 nodes and heavy traffic")
 start_network(50)
 time.sleep(5)
 
@@ -209,4 +235,3 @@ for key in random_keys:
     s.close()
 
 close_all_peers()
-
