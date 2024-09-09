@@ -7,7 +7,7 @@ import struct
 import time
 
 target_ip = '127.0.0.1'
-target_port = 7403
+target_port = 7401
 
 dht_key = b'lolzlolzlolzlolzlolzlolzlolzlolz'
 dht_value = b'bernd'

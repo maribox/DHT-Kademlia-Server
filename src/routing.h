@@ -59,8 +59,8 @@ class RoutingTable {
 
     size_t get_bucket_for(NodeID key) const;
 
-    std::vector<Node> find_closest_nodes(const NodeID &node_id) const;
-
+    std::vector<Node> find_closest_nodes_excluding_us(const NodeID &node_id) const;
+    std::vector<Node> find_closest_nodes_including_us(const NodeID &node_id) const;
     RoutingTable(const in6_addr& ip, const in_port_t& port, const NodeID& id = generate_random_nodeID());
     static int get_shared_prefix_bits(const KBucket& bucket);
     void split_bucket(const KBucket& bucket, int depth);

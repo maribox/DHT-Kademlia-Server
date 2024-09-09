@@ -51,8 +51,6 @@ enum P2PType {
     DHT_ERROR = 680
 };
 
-
-
 enum CertificateStatus{
     EXPECTED_CERTIFICATE = 0,
     NEW_VALID_CERTIFICATE,
@@ -73,6 +71,12 @@ enum PrefixedReceiveResult
     RECEIVED_EVERYTHING,
     RECEIVE_AGAIN,
     RECEIVE_FATAL
+};
+
+enum SocketResult {
+    KEEP_OPEN,
+    CLOSE_GRACEFULLY,
+    CLOSE_ON_ERROR
 };
 
 /*
@@ -96,8 +100,7 @@ enum ProcessingStatus{
 
 struct AsyncTask{
     std::chrono::time_point<std::chrono::system_clock> execution_time;
-    std::function<void (void*)> func;
-    void *args;
+    std::function<void ()> func;
 };
 
 namespace ServerConfig {
@@ -161,8 +164,8 @@ struct ConnectionInfo{
 // 3. is OperationType actually needed
 //
 enum class NodeRefreshStatus {
-    AWAITING_FIRST_REPLY,
-    AWAITING_PEER_REPLIES
+    FIRST_REPLY,
+    PEER_REPLIES
 };
 
 struct Request { // Requests involving NodeLookup: PUT, GET, NETWORK EXPANSION and maintenance
@@ -176,7 +179,7 @@ struct Request { // Requests involving NodeLookup: PUT, GET, NETWORK EXPANSION a
 
     // only defined for node lookup: PUT and GET
     Key key;
-    int checked_nodes_count; // This is the number of nodes around the key wey want to look at
+    int concurrently_checked_nodes_count; // This is the number of nodes around the key wey want to look at
     std::unordered_set<Node> previous_closest_nodes;
 
     // only defined for PUT/STORE
@@ -202,7 +205,7 @@ enum RequestType {
 struct RequestInfo {
     RequestType request_type;
     P2PType expected_p2p_reply;
-    Request* request;    // shared variable among all participants of the requesting operation
+    std::shared_ptr<Request> request;    // shared variable among all participants of the requesting operation
 
     Key rpc_id;
 };
@@ -278,17 +281,10 @@ void accept_new_connection(int epollfd, const epoll_event &cur_event, Connection
 int add_to_epoll(int epollfd, socket_t serversocketfd);
 
 socket_t setup_server_socket(u_short port);
-socket_t setup_connect_socket(int epollfd, const in6_addr& address, u_int16_t port, ConnectionType connection_type);
-
-bool read_EPOLLIN(int epollfd, const epoll_event& current_event);
-bool handle_EPOLLIN(int epollfd, const epoll_event &current_event);
-bool handle_EPOLLOUT(int epollfd, const epoll_event &current_event);
-
-socket_t set_socket_blocking(socket_t peer_socket, bool blocking);
-bool ensure_tls_blocking(socket_t peer_socket, int timeout_ms = 1000);
 
 
-int parse_commandline_args(int argc, const char* argv[]);
+void complete_node_refresh(int epollfd, const std::shared_ptr<Request> &request);
+void complete_node_lookup(int epollfd, const std::shared_ptr<Request> &request, RequestType request_type, Key& key);
 
 /*
  * Server Callstack for ssl_accept new connection:

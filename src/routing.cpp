@@ -23,7 +23,7 @@ bool KBucket::add_peer(const Node &peer) { // returns true if inserted or alread
     }
     if (peers.size() < K) {
         peers.push_back(peer);
-        logDebug("Added new node {} with ip {}:{} to RoutingTable", key_to_string(peer.id), ip_to_string(peer.addr), peer.port);
+        logInfo("Added new node {} with ip {}:{} to RoutingTable", key_to_string(peer.id), ip_to_string(peer.addr), peer.port);
         return true;
     } else {
         // according to 4.1, we have a replacement cache that gets filled if the K_Bucket is full.
@@ -145,9 +145,8 @@ bool RoutingTable::has_same_addr_or_id(const Node &node) const {
        (local_node.addr == node.addr && local_node.port == node.port);
 }
 
-std::vector<Node> RoutingTable::find_closest_nodes(const NodeID &target_node_id) const {
+std::vector<Node> RoutingTable::find_closest_nodes_excluding_us(const NodeID &target_node_id) const {
     std::vector<Node> closest_nodes;
-
 
     size_t bucket_index_right = get_bucket_for(target_node_id);
     auto bucket_index_left = static_cast<ssize_t>(bucket_index_right - 1);
@@ -171,14 +170,24 @@ std::vector<Node> RoutingTable::find_closest_nodes(const NodeID &target_node_id)
         bucket_index_right++;
     }
 
-    closest_nodes.push_back(local_node);
-
     sort_by_distance_to(closest_nodes, target_node_id);
 
     if (closest_nodes.size() > K) {
         closest_nodes.resize(K);
     }
 
+    return closest_nodes;
+}
+
+// These separate functions are to ensure that we don't accidenntally send requests to ourselves
+std::vector<Node> RoutingTable::find_closest_nodes_including_us(const NodeID &target_node_id) const {
+    auto closest_nodes = RoutingTable::find_closest_nodes_excluding_us(target_node_id);
+
+    closest_nodes.push_back(local_node);
+    sort_by_distance_to(closest_nodes, target_node_id);
+    if (closest_nodes.size() > K) {
+        closest_nodes.resize(K);
+    }
     return closest_nodes;
 }
 

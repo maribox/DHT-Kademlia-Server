@@ -76,7 +76,7 @@ void SSLUtils::dump_x509_store(SSL_CTX* ctx) {
 
             // Print the certificate details
             std::cout << "Certificate " << i + 1 << ":" << std::endl;
-            X509_print_fp(stdout, cert); // Print in human-readable format
+            //X509_print_fp(stdout, cert); // Print in human-readable format
             PEM_write_X509(stdout, cert); // Optionally print in PEM format
         }
     }
@@ -491,7 +491,7 @@ X509* CertUtils::create_self_signed_cert(EVP_PKEY* pkey, const std::string& ipv6
     return x509;
 }
 
-SSL_CTX* SSLUtils::create_context(bool am_i_server) {
+SSL_CTX* SSLUtils::create_context(bool am_i_server, bool should_verify_certificates) {
     const SSL_METHOD* method;
     SSL_CTX* ctx;
 
@@ -506,11 +506,25 @@ SSL_CTX* SSLUtils::create_context(bool am_i_server) {
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
     }
-    if(am_i_server)
-    {
+    if(am_i_server) {
         SSL_CTX_set_verify(ctx,SSL_VERIFY_NONE,nullptr);
-    }else{
-        SSL_CTX_set_verify(ctx,SSL_VERIFY_PEER,nullptr); //nullptr callback function --> default verification is used.
+    } else{
+        // tl;dr currently, we set SSL VERIFY to "NONE" by default - the encryption, our main goal, is still happening.
+
+        // We do not verify the certificates per default, because during extensive testing, sometimes the certification
+        // failed for inexplicable reasons.
+        // The client has the server certificate in its store and the messages are correctly decrypted, but
+        // verification somehow fails in some cases. Sadly, the library is not very well documented here.
+        // Many hours were spent on this weird problem (in the last days, we made a huge rewrite of the entire server,
+        // last but not least also to better identify the reason for this.
+        // This rewrite alone took about 50 hours).
+        // As we do not yet implement any authentication this is not too bad, because with our implementation anybody
+        // can access the network anyway.
+        if (should_verify_certificates) {
+            SSL_CTX_set_verify(ctx,SSL_VERIFY_PEER,nullptr); //nullptr callback function --> default verification is used.
+        } else {
+            SSL_CTX_set_verify(ctx,SSL_VERIFY_NONE,nullptr);
+        }
     }
 
     SSL_CTX_set_security_level(ctx,2); //Somewhat high security level. Very old clients may not support this level. :c
@@ -737,7 +751,7 @@ SSLStatus SSLUtils::try_ssl_accept(SSL* ssl){
             return SSLStatus::PENDING_ACCEPT_WRITE;
         }
         logDebug("try_ssl_accept: Had Error on SSL ACCEPT: {}", ssl_error);
-        //custom_error_investigation();
+        custom_error_investigation();
         //dump_x509_store(SSL_get_SSL_CTX(ssl));
 
         return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
@@ -757,7 +771,7 @@ SSLStatus SSLUtils::try_ssl_connect(SSL* ssl){
             return SSLStatus::PENDING_CONNECT_WRITE;
         }
         logDebug("try_ssl_connect: Had Error on SSL CONNECT: {}", ssl_error);
-        //custom_error_investigation();
+        custom_error_investigation();
         //dump_x509_store(SSL_get_SSL_CTX(ssl));
         return SSLStatus::FATAL_ERROR_ACCEPT_CONNECT;
     }

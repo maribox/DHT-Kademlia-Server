@@ -121,7 +121,7 @@ namespace SSLUtils {
     void check_ssl_blocking_mode(SSL* ssl);
     std::string check_ssl_blocking_mode_to_string(SSL *ssl);
     void dump_x509_store(SSL_CTX* ctx);
-    SSL_CTX* create_context(bool am_i_server);
+    SSL_CTX* create_context(bool am_i_server, bool should_verify_certificates);
     void send_certificate(int client_fd, X509* cert);
     void receive_certificate(int sock_fd, X509*& cert);
     void set_certificate_sendBuffer(int client_fd, X509* cert);

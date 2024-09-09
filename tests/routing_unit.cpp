@@ -112,7 +112,7 @@ TEST_CASE("RoutingTable", "[routing]") {
         REQUIRE(!RoutingTable::has_duplicate_id(all_nodes));
 
         NodeID target_node_id = generate_random_nodeID();
-        std::vector<Node> closest_nodes = routing_table.find_closest_nodes(target_node_id);
+        std::vector<Node> closest_nodes = routing_table.find_closest_nodes_including_us(target_node_id);
         REQUIRE(!RoutingTable::has_duplicate_id(closest_nodes));
         REQUIRE(closest_nodes.size() == K);
         NodeID last_distance = RoutingTable::node_distance(closest_nodes.at(0).id, target_node_id);
