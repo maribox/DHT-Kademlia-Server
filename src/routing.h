@@ -49,7 +49,7 @@ class RoutingTable {
     Node local_node;
 
    public:
-    void try_add_peer(const Node& peer);
+    void try_add_peer(const Node& peer, bool replace_if_similar = false);
     void split_bucket();
 
     size_t count();
@@ -71,7 +71,7 @@ class RoutingTable {
     static NodeID node_distance(const NodeID& node_1, const NodeID& node_2);
     static void sort_by_distance_to(std::vector<Node> nodes, Key key);
 
-    bool has_same_addr_or_id(const Node &node) const;
+    static bool has_same_addr_or_id(const Node& node1, const Node &node2);
 
     template<typename Iterable>
     static bool has_duplicate_id(const Iterable& nodes); // debug function

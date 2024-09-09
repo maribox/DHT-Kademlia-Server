@@ -169,7 +169,7 @@ enum class NodeRefreshStatus {
 };
 
 struct Request { // Requests involving NodeLookup: PUT, GET, NETWORK EXPANSION and maintenance
-    std::unordered_map<socket_t, bool> peer_request_finished;   // maps sockets of peers to whether the request is finished
+    std::unordered_map<socket_t, bool> is_peer_request_finished;   // maps sockets of peers to whether the request is finished
                                                                 // -> could be because they replied or an async function was called
     std::unordered_set<Node> known_stale_nodes;
 
@@ -181,15 +181,18 @@ struct Request { // Requests involving NodeLookup: PUT, GET, NETWORK EXPANSION a
     Key key;
     int concurrently_checked_nodes_count; // This is the number of nodes around the key wey want to look at
     std::unordered_set<Node> previous_closest_nodes;
+    bool completed_node_lookup;
 
     // only defined for PUT/STORE
     Value value;
     int time_to_live;
 
     // only defined for GET/FIND_VALUE
+    bool have_responded;
     socket_t requested_socket;
     std::vector<Value> received_values;
     size_t expected_answers_count;
+
 };
 
 enum RequestType {
@@ -254,8 +257,8 @@ ProcessingStatus handle_DHT_RPC_ping_reply(socket_t socket, u_short body_size);
 
 void forge_DHT_RPC_store(int epollfd, socket_t socketfd, u_short time_to_live, const Key &key, const Value &value);
 ProcessingStatus handle_DHT_RPC_store(int epollfd, socket_t socket, u_short body_size);
-void forge_DHT_RPC_store_reply(int epollfd, socket_t socket, const Key &rpc_id, const Key& key, const Value& value);
-ProcessingStatus handle_DHT_RPC_store_reply(socket_t socket, u_short body_size);
+//void forge_DHT_RPC_store_reply(int epollfd, socket_t socket, const Key &rpc_id, const Key& key, const Value& value);
+//ProcessingStatus handle_DHT_RPC_store_reply(socket_t socket, u_short body_size);
 
 void forge_DHT_RPC_find_node(socket_t socket, const NodeID &target_node_id);
 ProcessingStatus handle_DHT_RPC_find_node(int epollfd, socket_t socket, u_short body_size);
@@ -285,7 +288,7 @@ socket_t setup_server_socket(u_short port);
 
 void complete_node_refresh(int epollfd, const std::shared_ptr<Request> &request);
 void complete_node_lookup(int epollfd, const std::shared_ptr<Request> &request, RequestType request_type, Key& key);
-
+void respond_to_dht_get(Key key, const std::shared_ptr<Request> &request);
 /*
  * Server Callstack for ssl_accept new connection:
  * init_accept_ssl -> HANDSHAKE_SERVER_WRITE_CERT (possibly even --> PENDING_ACCEPT_READ/WRITE)
@@ -293,6 +296,7 @@ void complete_node_lookup(int epollfd, const std::shared_ptr<Request> &request, 
  * PENDING_ACCEPT_READ/WRITE -> try_ssl_accept() -> try_ssl_accept() -> ... -> try_ssl_accept() -> ACCEPTED
  */
 
+FlushResult flush_sendbuf_New(socket_t socketfd, ConnectionInfo& connection_info);
 
 socket_t init_tcp_connect_ssl(int epollfd, const in6_addr& address, u_int16_t port, ConnectionType connection_type);
 /*

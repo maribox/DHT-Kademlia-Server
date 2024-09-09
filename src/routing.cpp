@@ -140,10 +140,11 @@ void RoutingTable::sort_by_distance_to(std::vector<Node> nodes, Key key) {
         {return RoutingTable::node_distance(node_1.id, key) < RoutingTable::node_distance(node_2.id, key);});
 }
 
-bool RoutingTable::has_same_addr_or_id(const Node &node) const {
-    return local_node.id == node.id ||
-       (local_node.addr == node.addr && local_node.port == node.port);
+bool RoutingTable::has_same_addr_or_id(const Node& node1, const Node &node2) {
+    return node1.id == node2.id ||
+       (node1.addr == node2.addr && node1.port == node2.port);
 }
+
 
 std::vector<Node> RoutingTable::find_closest_nodes_excluding_us(const NodeID &target_node_id) const {
     std::vector<Node> closest_nodes;
@@ -268,10 +269,23 @@ void RoutingTable::split_bucket(const KBucket& bucket, int depth) {
 }
 
 
-//TODO: implement this. look at sections 2.2, 2.4, 4.2
-void RoutingTable::try_add_peer(const Node& peer) {
-    // TODO: replace with function
-    if (has_same_addr_or_id(peer)) {
+void RoutingTable::try_add_peer(const Node& peer, bool replace_if_similar) {
+        for (auto& bucket : bucket_list) {
+            for (auto& node : bucket.get_peers()) {
+                if (node.addr == peer.addr && node.port == peer.port && node.id != peer.id) {
+                    if (replace_if_similar) { // find all nodes with the same ip but different id and remove them
+                        remove(node);
+                        logInfo("Removed old node {} with ip {}:{} to RoutingTable", key_to_string(node.id), ip_to_string(node.addr), node.port);
+                        try_add_peer(peer, replace_if_similar);
+                        return;
+                    } else { // if we have a similar node already and we don't want to replace it, don't add the new node
+                        logDebug("Tried to add old node to RoutingTable");
+                        return;
+                    }
+                }
+            }
+        }
+    if (has_same_addr_or_id(local_node, peer)) {
         logDebug("Tried to add own node to RoutingTable. Returning");
         return;
     }
@@ -289,7 +303,7 @@ void RoutingTable::try_add_peer(const Node& peer) {
         if ((bucket.get_start() <= this->local_node.id && this->local_node.id <= bucket.get_end())
             || depth % 5 == 0) {
             split_bucket(bucket, depth);
-            try_add_peer(peer);
+            try_add_peer(peer, replace_if_similar);
         }
     }
 }
