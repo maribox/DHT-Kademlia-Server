@@ -41,6 +41,7 @@ def log_output(process, prefix, lock):
                 print(f"{prefix}: {line.decode('utf-8', errors='replace').strip()}")
 
 def start_peer_container(ip: str, i: int):
+    global verify_peer
     global base_module
     module_port = base_module
     p2p_port = base_module + 1
@@ -59,6 +60,10 @@ def start_peer_container(ip: str, i: int):
 
     start_command =  f"docker run {expose_ports_flags} -t --name dht_swarm_{i} --network {network_name} --ip {ip} dht_swarm /server/build/dht_server -a {ip} -m {module_port} -p {p2p_port} {flags} -l {loglevel}"
 
+    if verify_peer:
+        start_command += f" -v"
+    start_command = start_command.strip()
+
     if (print_mode):
         print(start_command)
     else:
@@ -69,7 +74,6 @@ def start_peer_container(ip: str, i: int):
 
 def start_network(n_peers):
     os.system(f"docker network inspect {network_name} > /dev/null 2>&1 || docker network create --subnet={ip_prefix}0.0/16 {network_name}")
-
     start_peer_container(f"{ip_prefix}0.2", 0)
     time.sleep(0.5)
 
@@ -137,12 +141,12 @@ number_of_containers = 4
 base_module = 7401
 
 loglevel = "info"  # can be trace|debug|info|warn|err|critical|off
-
+verify_peer = False
 print_mode = False
 #--------#--------#---------#
 
 
-if (print_mode):
+if print_mode:
     print("Warning, Print mode is enabled, we do not run any tests. All commands are only displayed, not run.")
     start_network(number_of_containers)
     exit()
@@ -176,13 +180,22 @@ s.close()
 close_all_peers()
 
 
-print("\nTEST 3 | Create network with 5 peers")
+print("\nTEST 3 | Create network with 5 peers without certificate validation")
 start_network(5)
 time.sleep(10)
 close_all_peers()
 
 
-print("\nTest 4 | Update peer in Routingtable after another takes their IP & Port")
+print("\nTEST 4 | Create network with 5 peers with certificate validation enforced. Bug \"SSL routines::certificate verify failed\".")
+verify_peer_before = verify_peer
+verify_peer = True
+start_network(5)
+time.sleep(10)
+close_all_peers()
+verify_peer = verify_peer_before
+
+
+print("\nTest 5 | Update peer in Routingtable after another takes their IP & Port")
 start_network(3)
 close_peer(2)
 close_peer(1)
@@ -199,8 +212,8 @@ start_peer_container(get_ip_for_index(2), 2)
 close_all_peers()
 
 
-#TODO @Marius, revise
-print("\nTEST 5 | Random node access for set and get operations")
+#TODO @Marius, revise prints errors
+print("\nTEST 6 | Random node access for set and get operations")
 start_network(5)
 time.sleep(2)
 random_node_ip = f"{ip_prefix}0.{random.randint(2, 6)}"
@@ -213,24 +226,23 @@ dht_client.send_get(s, dht_client.dht_key)
 s.close()
 close_all_peers()
 
-print("\nTEST 6 | Stress test with 50 nodes and heavy traffic")
+print("\nTEST 7 | Stress test with 50 nodes and heavy traffic")
 start_network(50)
 time.sleep(5)
 
 random_keys = []
 
 for key in range(0,20):
-    random_keys.append(random_string())
+    random_keys.append(bytes(random_string(), encoding='utf=8'))
 
-for _ in range(100):
-    random_node_ip = f"{ip_prefix}0.{random.randint(2, 40)}"
-    s = dht_client.get_socket(random_node_ip, base_module)
-    dht_client.send_put(s, key, random_string())
+for key in range(20):
+    s = dht_client.get_socket(host_ip, base_module)
+    dht_client.send_put(s, random_keys[key], bytes(random_string(), encoding='utf-8'))
     s.close()
 
 print("--------RESPONSES--------")
 for key in random_keys:
-    s = dht_client.get_socket(random_node_ip, base_module)
+    s = dht_client.get_socket(host_ip, base_module)
     dht_client.send_get(s, key)
     s.close()
 
